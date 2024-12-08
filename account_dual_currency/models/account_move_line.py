@@ -30,6 +30,7 @@ class AccountMoveLine(models.Model):
                                   default=lambda self: self._compute_balance_usd(),
                                   help="Technical field holding the debit_usd - credit_usd in order to open meaningful graph views from reports")
 
+    # Migration Note: Done
     @api.depends('currency_id', 'company_id', 'move_id.date','move_id.tax_today')
     def _compute_currency_rate(self):
 
@@ -57,13 +58,13 @@ class AccountMoveLine(models.Model):
             #print('line.currency_rate', line.currency_rate)
         self.env.context = dict(self.env.context, tasa_factura=None, calcular_dual_currency=False)
 
-
+    # Migration Note: Done
     @api.onchange('amount_currency')
     def _onchange_amount_currency(self):
         self._debit_usd()
         self._credit_usd()
 
-    # Migration Notes: No need to migrate
+    # Migration Notes: Done
     @api.onchange('price_unit_usd')
     def _onchange_price_unit_usd(self):
         for rec in self:
@@ -72,20 +73,20 @@ class AccountMoveLine(models.Model):
             else:
                 rec.price_unit = rec.price_unit_usd * rec.tax_today
 
-    # Migration Notes: No need to migrate
+    # Migration Notes: Done
     @api.onchange('product_id')
     def _onchange_product_id(self):
         #super()._onchange_product_id()
         self._price_unit_usd()
 
-    # Migration Notes: No need to migrate
+    # Migration Notes: Done
     @api.depends('debit_usd', 'credit_usd')
     def _compute_balance_usd(self):
         for line in self:
             line.balance_usd = line.debit_usd - line.credit_usd
 
 
-    # Migration Notes: No need to migrate
+    # Migration Notes: Done
     @api.depends('price_unit', 'product_id')
     def _price_unit_usd(self):
         for rec in self:
@@ -105,7 +106,7 @@ class AccountMoveLine(models.Model):
             # else:
             #     rec.price_unit = 0
 
-    # Migration Notes: No need to migrate
+    # Migration Notes: Done
     @api.depends('price_subtotal')
     def _price_subtotal_usd(self):
         for rec in self:
@@ -125,6 +126,7 @@ class AccountMoveLine(models.Model):
             # else:
             #     rec.price_subtotal = 0
 
+    # Migration Notes: Done
     @api.model
     def read_group(self, domain, fields, groupby, offset=0, limit=None, orderby=False, lazy=True):
         if 'tax_today' not in fields:
@@ -138,6 +140,7 @@ class AccountMoveLine(models.Model):
                 group['tax_today'] = 0
         return res
 
+    # Migration Note: Done
     @api.depends('amount_currency', 'tax_today','debit')
     def _debit_usd(self):
         for rec in self:
@@ -161,6 +164,7 @@ class AccountMoveLine(models.Model):
             else:
                 rec.debit_usd = 0
 
+    # Migration Note: Done
     @api.depends('amount_currency', 'tax_today','credit')
     def _credit_usd(self):
         for rec in self:
@@ -187,6 +191,7 @@ class AccountMoveLine(models.Model):
             else:
                 rec.credit_usd = 0
 
+    # Migration Note: Done
     @api.depends('debit','credit','debit_usd', 'credit_usd', 'amount_currency', 'account_id', 'currency_id', 'move_id.state',
                  'company_id',
                  'matched_debit_ids', 'matched_credit_ids')
@@ -208,6 +213,7 @@ class AccountMoveLine(models.Model):
                 line.reconciled = False
 
 
+    # Migration Notes: done
     #nuevo método para reconciliar en v17
     @api.model
     def _reconcile_plan(self, reconciliation_plan):
@@ -267,8 +273,7 @@ class AccountMoveLine(models.Model):
         partial_index = 0
         for plan in plan_list:
             plan_results = self \
-                .with_context(
-                no_exchange_difference=self._context.get('no_exchange_difference') or disable_partial_exchange_diff) \
+                .with_context(no_exchange_difference=self._context.get('no_exchange_difference') or disable_partial_exchange_diff) \
                 ._prepare_reconciliation_plan(plan, aml_values_map)
             all_plan_results.append(plan_results)
             for results in plan_results:
@@ -296,14 +301,14 @@ class AccountMoveLine(models.Model):
         for index, exchange_move in zip(exchange_diff_partial_index, exchange_moves):
             partials[index].exchange_move_id = exchange_move
 
-        # ==== Create entries for cash basis taxes ====
-        def is_cash_basis_needed(account):
-            return account.company_id.tax_exigibility \
-                and account.account_type in ('asset_receivable', 'liability_payable')
+
+        def is_cash_basis_needed(amls):
+            return any(amls.company_id.mapped('tax_exigibility')) \
+                and amls.account_id.account_type in ('asset_receivable', 'liability_payable')
 
         if not self._context.get('move_reverse_cancel') and not self._context.get('no_cash_basis'):
             for plan in plan_list:
-                if is_cash_basis_needed(plan['amls'].account_id):
+                if is_cash_basis_needed(plan['amls']):
                     plan['partials']._create_tax_cash_basis_moves()
 
         # ==== Prepare full reconcile creation ====
@@ -390,9 +395,8 @@ class AccountMoveLine(models.Model):
                 # If we are fully reversing the entry, no need to fix anything since the journal entry
                 # is exactly the mirror of the source journal entry.
                 caba_lines_to_reconcile = None
-                if is_cash_basis_needed(involved_amls.account_id) and not self._context.get('move_reverse_cancel'):
-                    caba_lines_to_reconcile = involved_amls._add_exchange_difference_cash_basis_vals(
-                        exchange_diff_values)
+                if is_cash_basis_needed(involved_amls) and not self._context.get('move_reverse_cancel'):
+                    caba_lines_to_reconcile = involved_amls._add_exchange_difference_cash_basis_vals(exchange_diff_values)
 
                 # Prepare the exchange difference.
                 if exchange_diff_values['move_values']['line_ids']:

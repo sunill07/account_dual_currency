@@ -100,11 +100,12 @@ class AccountMove(models.Model):
             'currency_id': self.currency_id.id,
             'state': 'draft',
             'tax_today':self.tax_today,
-            'ref':self.ref,
+            'ref':self.memo,
             'move_type': 'entry',
             'line_ids': [
                 (0, 0, {
-                'account_id': diario.company_id.account_journal_payment_debit_account_id.id if self.payment_type == 'inbound' else diario.company_id.account_journal_payment_credit_account_id.id,
+                # 'account_id': diario.company_id.account_journal_payment_debit_account_id.id if self.payment_type == 'inbound' else diario.company_id.account_journal_payment_credit_account_id.id,
+                'account_id': self.payment_method_line_id.payment_method_id.id or diario.default_account_id.id,                
                 'company_id': self.company_id.id,
                 'currency_id': self.currency_id.id,
                 'date_maturity': False,
