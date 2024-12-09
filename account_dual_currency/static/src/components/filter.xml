@@ -15,12 +15,12 @@
                     </t>
                     <DropdownItem
                             class="{ 'filter_date_single_today_hook': true, 'selected': (controller.options.currency_dif == controller.options.currency_id_company_name) }"
-                            onSelected="() => this.updateFilter('currency_dif', controller.options.currency_id_company_name)">
+                            onSelected="() => this.filterClicked({ optionKey: 'currency_dif', optionValue: controller.options.currency_id_company_name, reload: true})">
                         <t t-esc="controller.options.currency_id_company_name"/>
                     </DropdownItem>
                     <DropdownItem
                             class="{ 'filter_date_single_last_month_hook': true, 'selected': (controller.options.currency_dif == controller.options.currency_id_dif_name) }"
-                            onSelected="() => this.updateFilter('currency_dif', controller.options.currency_id_dif_name)">
+                            onSelected="() => this.filterClicked({ optionKey: 'currency_dif', optionValue: controller.options.currency_id_dif_name, reload: true})">
                         <t t-esc="controller.options.currency_id_dif_name"/>
                     </DropdownItem>
                 </Dropdown>
