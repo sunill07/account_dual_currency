@@ -24,6 +24,8 @@ from odoo.tools.misc import formatLang, format_date, xlsxwriter
 from odoo.tools.safe_eval import expr_eval, safe_eval
 from odoo.models import check_method_name
 
+CURRENCIES_USING_LAKH = {'AFN', 'BDT', 'INR', 'MMK', 'NPR', 'PKR', 'LKR'}
+
 class AccountReport(models.AbstractModel):
     _inherit = 'account.report'
 
@@ -90,13 +92,15 @@ class AccountReport(models.AbstractModel):
     def _compute_search_template(self):
         self.search_template = 'account_dual_currency.search_template_generic_currency_dif'
 
+
+    # Migration Notes: Done
     def get_options(self, previous_options=None):
         self.ensure_one()
 
         initializers_in_sequence = self._get_options_initializers_in_sequence()
         options = {}
 
-        if (previous_options or {}).get('_running_export_test'):
+        if previous_options.get('_running_export_test'):
             options['_running_export_test'] = True
 
         # We need report_id to be initialized. Compute the necessary options to check for reroute.
@@ -110,7 +114,7 @@ class AccountReport(models.AbstractModel):
         # Stop the computation to check for reroute once we have computed the necessary information
         if (not self.root_report_id or (self.use_sections and self.section_report_ids)) and options['report_id'] != self.id:
             # Load the variant/section instead of the root report
-            variant_options = {**(previous_options or {})}
+            variant_options = {**previous_options}
             for reroute_opt_key in ('selected_variant_id', 'selected_section_id', 'variants_source_id', 'sections_source_id'):
                 opt_val = options.get(reroute_opt_key)
                 if opt_val:
@@ -127,7 +131,9 @@ class AccountReport(models.AbstractModel):
         options_companies = self.env['res.company'].browse(self.get_report_company_ids(options))
         if not options_companies._all_branches_selected():
             for button in filter(lambda x: not x.get('branch_allowed'), options['buttons']):
-                button['disabled'] = True
+                # button['disabled'] = True
+                button['error_action'] = 'show_error_branch_allowed'
+
 
         options['buttons'] = sorted(options['buttons'], key=lambda x: x.get('sequence', 90))
         #get company selected
@@ -151,44 +157,9 @@ class AccountReport(models.AbstractModel):
         self.env.context = new_context
         return options
 
-    # antiguo metodo de v16, reemplazado por el nuevo de v17
-    # def _get_options(self, previous_options=None):
-    #     self.ensure_one()
-    #     # Create default options.
-    #     options = {'unfolded_lines': (previous_options or {}).get('unfolded_lines', [])}
-    #
-    #     for initializer in self._get_options_initializers_in_sequence():
-    #         initializer(options, previous_options=previous_options)
-    #
-    #     # Sort the buttons list by sequence, for rendering
-    #     options['buttons'] = sorted(options['buttons'], key=lambda x: x.get('sequence', 90))
-    #
-    #     currency_id_company_name = 'Bs'
-    #     currency_id_dif_name = 'USD'
-    #     if self._context.get('allowed_company_ids'):
-    #         company_id = self._context.get('allowed_company_ids')[0]
-    #         company = self.env['res.company'].browse(company_id)
-    #         if company:
-    #             currency_id_company_name = company.currency_id.symbol
-    #             currency_id_dif_name = company.currency_id_dif.symbol
-    #     currency_dif = currency_id_company_name
-    #     if previous_options:
-    #         if "currency_dif" in previous_options:
-    #             currency_dif = previous_options['currency_dif']
-    #     options['currency_dif'] = currency_dif
-    #     options['currency_id_company_name'] = currency_id_company_name
-    #     options['currency_id_dif_name'] = currency_id_dif_name
-    #     new_context = {
-    #         **self._context,
-    #         'currency_dif': currency_dif,
-    #         'currency_id_company_name': currency_id_company_name,
-    #     }
-    #     self.env.context = new_context
-    #     print('options', options)
-    #     return options
-
+    # Migration Notes: Done
     @api.model
-    def format_value(self, options, value, currency=False, blank_if_zero=False, figure_type=None, digits=1):
+    def _format_value(self, options, value, figure_type, format_params=None):
         """ Formats a value for display in a report (not especially numerical). figure_type provides the type of formatting we want.
         """
         if value is None:
@@ -200,34 +171,45 @@ class AccountReport(models.AbstractModel):
         if isinstance(value, str) or figure_type == 'string':
             return str(value)
 
+        if format_params is None:
+            format_params = {}
+
+        formatLang_params = {
+            'rounding_method': 'HALF-UP',
+            'rounding_unit': options.get('rounding_unit'),
+        }
+
         if figure_type == 'monetary':
-            currency = currency or self.env.company.currency_id
+            currency = self.env['res.currency'].browse(format_params['currency_id']) if 'currency_id' in format_params else self.env.company.currency_id
+
             if options.get('currency_dif'):
                 if options.get('currency_dif') == options.get('currency_id_company_name'):
                     currency = self.env.company.currency_id
                 else:
                     currency = self.env.company.currency_id_dif
+            formatLang_params['currency_obj'] = currency
             digits = currency.decimal_places
+
         elif figure_type == 'integer':
-            currency = None
-            digits = 0
+            formatLang_params['digits'] = 0
+
         elif figure_type == 'boolean':
             return _("Yes") if bool(value) else _("No")
+
         elif figure_type in ('date', 'datetime'):
             return format_date(self.env, value)
-        else:
-            currency = None
 
-        if self.is_zero(value, currency=currency, figure_type=figure_type, digits=digits):
-            if blank_if_zero:
-                return ''
-            # don't print -0.0 in reports
+        else:
+            formatLang_params['digits'] = format_params.get('digits', 1)
+
+        if self._is_value_zero(value, figure_type, format_params):
+            # Make sure -0.0 becomes 0.0
             value = abs(value)
 
         if self._context.get('no_format'):
             return value
 
-        formatted_amount = formatLang(self.env, value, digits=digits, currency_obj=currency, rounding_method='HALF-UP', rounding_unit=options.get('rounding_unit'))
+        formatted_amount = formatLang(self.env, value, **formatLang_params)
 
         if figure_type == 'percentage':
             return f"{formatted_amount}%"
@@ -237,10 +219,13 @@ class AccountReport(models.AbstractModel):
     ####################################################
     # OPTIONS: ROUNDING UNIT
     ####################################################
-    def _init_options_rounding_unit(self, options, previous_options=None):
+    
+    # Migration Notes: Done
+    def _init_options_rounding_unit(self, options, previous_options):
         default = 'decimals'
-        main_company = self.env.company
-
+        options['rounding_unit'] = previous_options.get('rounding_unit', default)
+        
+        main_company = self.env.company  
         currency_id_company_name = main_company.currency_id.symbol
         currency_id_dif_name = main_company.currency_id_dif.symbol
         currency_dif = currency_id_company_name
@@ -251,31 +236,28 @@ class AccountReport(models.AbstractModel):
         options['currency_id_company_name'] = currency_id_company_name
         options['currency_id_dif_name'] = currency_id_dif_name
 
-        if previous_options:
-            options['rounding_unit'] = previous_options.get('rounding_unit', default)
-        else:
-            options['rounding_unit'] = default
-
         options['rounding_unit_names'] = self._get_rounding_unit_names(options)
 
-    def _get_rounding_unit_names(self,options=None):
+    # Migration Notes: Done
+    def _get_rounding_unit_names(self, options=None):
         currency_symbol = self.env.company.currency_id.symbol
+        currency_name = self.env.company.currency_id.name
+
         if options.get('currency_dif'):
             if options.get('currency_dif') == options.get('currency_id_company_name'):
                 currency_symbol = self.env.company.currency_id.symbol
             else:
                 currency_symbol = self.env.company.currency_id_dif.symbol
+
         rounding_unit_names = [
-            ('decimals', '.%s' % currency_symbol),
-            ('units', '%s' % currency_symbol),
-            ('thousands', 'K%s' % currency_symbol),
-            ('millions', 'M%s' % currency_symbol),
+            ('decimals', (f'.{currency_symbol}', '')),
+            ('units', (f'{currency_symbol}', '')),
+            ('thousands', (f'K{currency_symbol}', _('Amounts in Thousands'))),
+            ('millions', (f'M{currency_symbol}', _('Amounts in Millions'))),
         ]
 
-        # We want to add 'lakhs' for Indian Rupee
-        if (self.env.company.currency_id == self.env.ref('base.INR')):
-            # We want it between 'thousands' and 'millions'
-            rounding_unit_names.insert(3, ('lakhs', 'L%s' % currency_symbol))
+        if currency_name in CURRENCIES_USING_LAKH:
+            rounding_unit_names.insert(3, ('lakhs', (f'L{currency_symbol}', _('Amounts in Lakhs'))))
 
         return dict(rounding_unit_names)
 
