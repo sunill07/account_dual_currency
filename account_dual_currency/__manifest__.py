@@ -54,6 +54,7 @@
     ],
     'assets': {
         'web.assets_backend': [
+            ('replace', 'account_reports/static/src/components/account_report/filters/filters.xml', 'account_dual_currency/static/src/components/filter.xml'),
             #'account_dual_currency/static/src/components/filter_date.xml',
             'account_dual_currency/static/src/components/filter.xml',
             #'account_dual_currency/static/src/components/account_payment.xml',
