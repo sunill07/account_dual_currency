@@ -389,7 +389,7 @@ class AgedPartnerBalanceCustomHandler(models.AbstractModel):
                     multiplicator=multiplicator,
                     column_name=SQL.identifier(f"period{i}"),
                     balance_select=report._currency_table_apply_rate(SQL(
-                        "account_move_line.balance_usd - COALESCE(part_debit.amount_usd, 0) + COALESCE(part_credit.amount_usd, 0)"
+                        "account_move_line.balance_usd - COALESCE(part_debit.amount, 0) + COALESCE(part_credit.amount, 0)"
                     )),
                 )
                 for i in range(len(periods))
