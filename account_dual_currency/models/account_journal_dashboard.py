@@ -27,9 +27,9 @@ class account_journal(models.Model):
         sale_purchase_journals = self.filtered(lambda journal: journal.type in ('sale', 'purchase'))
         purchase_journals = self.filtered(lambda journal: journal.type == 'purchase')
         sale_journals = self.filtered(lambda journal: journal.type == 'sale')
-        currency_id_dif = sale_purchase_journals[0].company_id.currency_id_dif
         if not sale_purchase_journals:
             return
+        currency_id_dif = sale_purchase_journals[0].company_id.currency_id_dif
         bills_field_list = [
             "account_move.journal_id",
             "(CASE WHEN account_move.move_type IN ('out_refund', 'in_refund') THEN -1 ELSE 1 END) * account_move.amount_residual AS amount_total",
