@@ -1,15 +1,15 @@
+# -*- coding: utf-8 -*-
+
 import ast
 from babel.dates import format_datetime, format_date
 from collections import defaultdict
 from datetime import datetime, timedelta
 import json
 import random
-
 from odoo import models, api, _, fields
 from odoo.exceptions import UserError
 from odoo.osv import expression
 from odoo.release import version
-# from odoo.tools import DEFAULT_SERVER_DATE_FORMAT as DF
 from odoo.tools import DEFAULT_SERVER_DATE_FORMAT as DF, SQL
 from odoo.tools.misc import formatLang, format_date as odoo_format_date, get_lang
 
@@ -21,103 +21,6 @@ def group_by_journal(vals_list):
 
 class account_journal(models.Model):
     _inherit = "account.journal"
-
-    # def _fill_sale_purchase_dashboard_data(self, dashboard_data):
-    #     """Populate all sale and purchase journal's data dict with relevant information for the kanban card."""
-    #     sale_purchase_journals = self.filtered(lambda journal: journal.type in ('sale', 'purchase'))
-    #     purchase_journals = self.filtered(lambda journal: journal.type == 'purchase')
-    #     sale_journals = self.filtered(lambda journal: journal.type == 'sale')
-    #     currency_id_dif = sale_purchase_journals[0].company_id.currency_id_dif
-    #     if not sale_purchase_journals:
-    #         return
-    #     bills_field_list = [
-    #         "account_move.journal_id",
-    #         "(CASE WHEN account_move.move_type IN ('out_refund', 'in_refund') THEN -1 ELSE 1 END) * account_move.amount_total_usd AS amount_total",
-    #         "(CASE WHEN account_move.move_type IN ('in_invoice', 'in_refund', 'in_receipt') THEN -1 ELSE 1 END) * account_move.amount_total_usd AS amount_total_company",
-    #         "account_move.currency_id AS currency",
-    #         "account_move.move_type",
-    #         "account_move.invoice_date",
-    #         "account_move.company_id",
-    #     ]
-    #     payment_field_list = [
-    #         "account_move_line.journal_id",
-    #         "account_move_line.move_id",
-    #         "-account_move_line.amount_residual AS amount_total_company",
-    #     ]
-    #     # DRAFTS
-    #     query, params = sale_purchase_journals._get_draft_bills_query().select(*bills_field_list)
-    #     self.env.cr.execute(query, params)
-    #     query_results_drafts = group_by_journal(self.env.cr.dictfetchall())
-
-    #     # WAITING BILLS AND PAYMENTS
-    #     query_results_to_pay = {}
-    #     if purchase_journals:
-    #         query, params = purchase_journals._get_open_payments_query().select(*payment_field_list)
-    #         self.env.cr.execute(query, params)
-    #         query_results_payments_to_pay = group_by_journal(self.env.cr.dictfetchall())
-    #         for journal in purchase_journals:
-    #             query_results_to_pay[journal.id] = query_results_payments_to_pay[journal.id]
-    #     if sale_journals:
-    #         query, params = sale_journals._get_open_bills_to_pay_query().select(*bills_field_list)
-    #         self.env.cr.execute(query, params)
-    #         query_results_bills_to_pay = group_by_journal(self.env.cr.dictfetchall())
-    #         for journal in sale_journals:
-    #             query_results_to_pay[journal.id] = query_results_bills_to_pay[journal.id]
-
-    #     # LATE BILLS AND PAYMENTS
-    #     late_query_results = {}
-    #     if purchase_journals:
-    #         query, params = purchase_journals._get_late_payment_query().select(*payment_field_list)
-    #         self.env.cr.execute(query, params)
-    #         late_payments_query_results = group_by_journal(self.env.cr.dictfetchall())
-    #         for journal in purchase_journals:
-    #             late_query_results[journal.id] = late_payments_query_results[journal.id]
-    #     if sale_journals:
-    #         query, params = sale_journals._get_late_bills_query().select(*bills_field_list)
-    #         self.env.cr.execute(query, params)
-    #         late_bills_query_results = group_by_journal(self.env.cr.dictfetchall())
-    #         for journal in sale_journals:
-    #             late_query_results[journal.id] = late_bills_query_results[journal.id]
-
-    #     to_check_vals = {
-    #         journal: (amount_total_signed_sum, count)
-    #         for journal, amount_total_signed_sum, count in self.env['account.move']._read_group(
-    #             domain=[('journal_id', 'in', sale_purchase_journals.ids), ('to_check', '=', True)],
-    #             groupby=['journal_id'],
-    #             aggregates=['amount_total_signed:sum', '__count'],
-    #         )
-    #     }
-
-    #     sale_purchase_journals._fill_dashboard_data_count(dashboard_data, 'account.move', 'entries_count', [])
-    #     for journal in sale_purchase_journals:
-    #         # User may have read access on the journal but not on the company
-    #         currency = journal.currency_id or self.env['res.currency'].browse(journal.company_id.sudo().currency_id.id)
-    #         (number_waiting, sum_waiting) = self._count_results_and_sum_amounts(query_results_to_pay[journal.id], currency)
-    #         (number_draft, sum_draft) = self._count_results_and_sum_amounts(query_results_drafts[journal.id], currency)
-    #         (number_late, sum_late) = self._count_results_and_sum_amounts(late_query_results[journal.id], currency)
-    #         amount_total_signed_sum, count = to_check_vals.get(journal.id, (0, 0))
-    #         dashboard_data[journal.id].update({
-    #             'number_to_check': count,
-    #             'to_check_balance': currency.format(amount_total_signed_sum),
-    #             'title': _('Bills to pay') if journal.type == 'purchase' else _('Invoices owed to you'),
-    #             'number_draft': number_draft,
-    #             'number_waiting': number_waiting,
-    #             'number_late': number_late,
-    #             'sum_draft': currency.format(sum_draft * currency_id_dif.rate),
-    #             'sum_draft_usd': currency_id_dif.format(sum_draft),
-
-    #             'sum_waiting': currency.format(sum_waiting * currency_id_dif.rate),
-    #             'sum_waiting_usd': formatLang(self.env, currency_id_dif.round(sum_waiting) + 0.0,
-    #                                           currency_obj=currency_id_dif),
-
-    #             'sum_late': currency.format(sum_late * currency_id_dif.rate),
-    #             'sum_late_usd': formatLang(self.env, currency_id_dif.round(sum_late) + 0.0,
-    #                                        currency_obj=currency_id_dif),
-
-    #             'has_sequence_holes': journal.has_sequence_holes,
-    #             'is_sample_data': dashboard_data[journal.id]['entries_count'],
-    #         })
-    
 
     def _fill_sale_purchase_dashboard_data(self, dashboard_data):
         """Populate all sale and purchase journal's data dict with relevant information for the kanban card."""
@@ -220,17 +123,10 @@ class account_journal(models.Model):
                 'number_waiting': number_waiting,
                 'number_late': number_late,
                 'sum_draft': currency.format(sum_draft),  # sign is already handled by the SQL query
-                # 'sum_draft_usd': formatLang(self.env, currency.format(sum_draft * currency_id_dif.rate),
-                #                   currency_obj=currency_id_dif),
                 'sum_draft_usd': currency_id_dif.format(sum_draft * currency_id_dif.rate),
-
-                # 'sum_waiting_usd': formatLang(self.env, currency.format(sum_waiting * currency_id_dif.rate * (1 if journal.type == 'sale' else -1)),
-                #                   currency_obj=currency_id_dif),
                 'sum_waiting_usd': currency_id_dif.format(sum_waiting * currency_id_dif.rate * (1 if journal.type == 'sale' else -1)),
                 'sum_waiting': currency.format(sum_waiting * (1 if journal.type == 'sale' else -1)),
                 'sum_late': currency.format(sum_late * (1 if journal.type == 'sale' else -1)),
-                # 'sum_late_usd': formatLang(self.env, currency.format(sum_late * currency_id_dif.rate * (1 if journal.type == 'sale' else -1)),
-                #                   currency_obj=currency_id_dif),
                 'sum_late_usd': currency_id_dif.format(sum_late * currency_id_dif.rate * (1 if journal.type == 'sale' else -1)),
                 'has_sequence_holes': journal.has_sequence_holes,
                 'title_has_sequence_holes': title_has_sequence_holes,

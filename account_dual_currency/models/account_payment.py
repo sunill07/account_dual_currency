@@ -6,11 +6,11 @@ class AccountMove(models.Model):
 
     tax_today = fields.Float(string="Tasa", default=lambda self: self._get_default_tasa(), digits='Dual_Currency_rate')
     currency_id_dif = fields.Many2one("res.currency",
-                                      string="Divisa de Referencia",
-                                      default=lambda self: self.env.company.currency_id_dif )
+        string="Divisa de Referencia",
+        default=lambda self: self.env.company.currency_id_dif )
     currency_id_company = fields.Many2one("res.currency",
-                                      string="Divisa compañia",
-                                      default=lambda self: self.env.company.currency_id )
+        string="Divisa compañia",
+        default=lambda self: self.env.company.currency_id )
     amount_local = fields.Monetary(string="Importe local", currency_field='currency_id_company')
     amount_ref = fields.Monetary(string="Importe referencia", currency_field='currency_id_dif' )
     currency_equal = fields.Boolean(compute="_currency_equal")
@@ -25,10 +25,10 @@ class AccountMove(models.Model):
     igtf_divisa_porcentage = fields.Float('% IGTF', related='company_id.igtf_divisa_porcentage')
 
     mount_igtf = fields.Monetary(currency_field='currency_id', string='Importe IGTF', readonly=True,
-                                 digits='Dual_Currency')
+        digits='Dual_Currency')
 
     amount_total_pagar = fields.Monetary(currency_field='currency_id', string="Total Pagar(Importe + IGTF):",
-                                         readonly=True)
+        readonly=True)
 
     move_id_igtf_divisa = fields.Many2one(
         'account.move', 'Asiento IGTF Divisa',
@@ -104,7 +104,6 @@ class AccountMove(models.Model):
             'move_type': 'entry',
             'line_ids': [
                 (0, 0, {
-                # 'account_id': diario.company_id.account_journal_payment_debit_account_id.id if self.payment_type == 'inbound' else diario.company_id.account_journal_payment_credit_account_id.id,
                 'account_id': self.payment_method_line_id.payment_method_id.id or diario.default_account_id.id,                
                 'company_id': self.company_id.id,
                 'currency_id': self.currency_id.id,
@@ -133,7 +132,6 @@ class AccountMove(models.Model):
             }),
             ],
         }
-
 
         move_id = self.env['account.move'].with_context(check_move_validity=False).create(vals)
 

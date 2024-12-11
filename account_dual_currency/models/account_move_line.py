@@ -13,22 +13,22 @@ class AccountMoveLine(models.Model):
     _inherit = 'account.move.line'
 
     debit_usd = fields.Monetary(currency_field='currency_id_dif', string='Débito $', store=True, compute="_debit_usd",
-                                 readonly=False, )
+        readonly=False, )
     credit_usd = fields.Monetary(currency_field='currency_id_dif', string='Crédito $', store=True,
-                                 compute="_credit_usd", readonly=False)
+        compute="_credit_usd", readonly=False)
     tax_today = fields.Float(related="move_id.tax_today", store=True, digits='Dual_Currency_rate')
     currency_id_dif = fields.Many2one("res.currency", related="move_id.currency_id_dif", store=True)
     price_unit_usd = fields.Monetary(currency_field='currency_id_dif', string='Precio $', store=True,
-                                     compute='_price_unit_usd', readonly=False)
+        compute='_price_unit_usd', readonly=False)
     price_subtotal_usd = fields.Monetary(currency_field='currency_id_dif', string='SubTotal $', store=True,
-                                         compute="_price_subtotal_usd", digits='Dual_Currency')
+        compute="_price_subtotal_usd", digits='Dual_Currency')
     amount_residual_usd = fields.Monetary(string='Residual Amount USD', computed='_compute_amount_residual_usd', store=True,
-                                       help="The residual amount on a journal item expressed in the company currency.")
+        help="The residual amount on a journal item expressed in the company currency.")
     balance_usd = fields.Monetary(string='Balance Ref.',
-                                  currency_field='currency_id_dif', store=True, readonly=False,
-                                  compute='_compute_balance_usd',
-                                  default=lambda self: self._compute_balance_usd(),
-                                  help="Technical field holding the debit_usd - credit_usd in order to open meaningful graph views from reports")
+        currency_field='currency_id_dif', store=True, readonly=False,
+        compute='_compute_balance_usd',
+        default=lambda self: self._compute_balance_usd(),
+        help="Technical field holding the debit_usd - credit_usd in order to open meaningful graph views from reports")
 
     # Migration Note: Done
     @api.depends('currency_id', 'company_id', 'move_id.date','move_id.tax_today')
@@ -42,20 +42,11 @@ class AccountMoveLine(models.Model):
                 company=company,
                 date=date,
             )
-            #print('pasando por get_rate', rate)
             return rate
 
         for line in self:
-            #print('pasando por _compute_currency_rate')
             self.env.context = dict(self.env.context, tasa_factura=line.move_id.tax_today, calcular_dual_currency=True)
-            # line.currency_rate = get_rate(
-            #     from_currency=line.company_currency_id,
-            #     to_currency=line.currency_id,
-            #     company=line.company_id,
-            #     date=line.move_id.invoice_date or line.move_id.date or fields.Date.context_today(line),
-            # )
             line.currency_rate = 1 / line.move_id.tax_today if line.move_id.tax_today > 0 else 1
-            #print('line.currency_rate', line.currency_rate)
         self.env.context = dict(self.env.context, tasa_factura=None, calcular_dual_currency=False)
 
     # Migration Note: Done
@@ -76,7 +67,6 @@ class AccountMoveLine(models.Model):
     # Migration Notes: Done
     @api.onchange('product_id')
     def _onchange_product_id(self):
-        #super()._onchange_product_id()
         self._price_unit_usd()
 
     # Migration Notes: Done
@@ -98,14 +88,6 @@ class AccountMoveLine(models.Model):
             else:
                 rec.price_unit_usd = 0
 
-            # if rec.price_unit_usd > 0:
-            #     if rec.move_id.currency_id == self.env.company.currency_id:
-            #         rec.price_unit = rec.price_unit_usd * rec.tax_today
-            #     else:
-            #         rec.price_unit = rec.price_unit_usd
-            # else:
-            #     rec.price_unit = 0
-
     # Migration Notes: Done
     @api.depends('price_subtotal')
     def _price_subtotal_usd(self):
@@ -117,14 +99,6 @@ class AccountMoveLine(models.Model):
                     rec.price_subtotal_usd = rec.price_subtotal
             else:
                 rec.price_subtotal_usd = 0
-
-            # if rec.price_subtotal_usd > 0:
-            #     if rec.move_id.currency_id == self.env.company.currency_id:
-            #         rec.price_subtotal = rec.price_subtotal_usd * rec.tax_today
-            #     else:
-            #         rec.price_subtotal = rec.price_subtotal_usd
-            # else:
-            #     rec.price_subtotal = 0
 
     # Migration Notes: Done
     @api.model
@@ -148,19 +122,8 @@ class AccountMoveLine(models.Model):
                 if rec.move_id.currency_id == self.env.company.currency_id:
                     amount_currency = (rec.amount_currency if rec.amount_currency > 0 else (rec.amount_currency * -1))
                     rec.debit_usd = (amount_currency / rec.tax_today) if rec.tax_today > 0 else 0
-                    #rec.debit = amount_currency
                 else:
                     rec.debit_usd = (rec.amount_currency if rec.amount_currency > 0 else (rec.amount_currency * -1))
-                
-                    # if not 'calcular_dual_currency' in self.env.context:
-                    #     if not rec.move_id.stock_move_id:
-                    #         module_dual_currency = self.env['ir.module.module'].sudo().search(
-                    #             [('name', '=', 'account_dual_currency'), ('state', '=', 'installed')])
-                    #         if module_dual_currency:
-                    #             # rec.debit = ((rec.amount_currency * rec.tax_today) if rec.amount_currency > 0 else (
-                    #             #         (rec.amount_currency * -1) * rec.tax_today))
-                    #             rec.with_context(check_move_validity=False).debit = (rec.debit_usd * rec.tax_today)
-
             else:
                 rec.debit_usd = 0
 
@@ -173,21 +136,9 @@ class AccountMoveLine(models.Model):
                 if rec.move_id.currency_id == self.env.company.currency_id:
                     amount_currency = (rec.amount_currency if rec.amount_currency > 0 else (rec.amount_currency * -1))
                     rec.credit_usd = (amount_currency / rec.tax_today) if rec.tax_today > 0 else 0
-                    #rec.credit = amount_currency
                 else:
                     rec.credit_usd = (rec.amount_currency if rec.amount_currency > 0 else (rec.amount_currency * -1))
                     model = self.env.context.get('active_model')
-                    #print('contexto--->', self._context)
-                    #print('contexto', self.env.context)
-                    # if not 'calcular_dual_currency' in self.env.context:
-                    #     if not rec.move_id.stock_move_id:
-                    #         module_dual_currency = self.env['ir.module.module'].sudo().search(
-                    #             [('name', '=', 'account_dual_currency'), ('state', '=', 'installed')])
-                    #         if module_dual_currency:
-                    #             #rec.credit = ((rec.amount_currency * rec.tax_today) if rec.amount_currency > 0 else (
-                    #             #        (rec.amount_currency * -1) * rec.tax_today))
-                    #             rec.with_context(check_move_validity=False).credit = rec.credit_usd * rec.tax_today
-
             else:
                 rec.credit_usd = 0
 
@@ -278,10 +229,6 @@ class AccountMoveLine(models.Model):
             all_plan_results.append(plan_results)
             for results in plan_results:
                 partials_values_list.append(results['partial_values'])
-                # if results.get('exchange_values') and results['exchange_values']['move_values']['line_ids']:
-                #     exchange_diff_values_list.append(results['exchange_values'])
-                #     exchange_diff_partial_index.append(partial_index)
-                #     partial_index += 1
 
         # ==== Create the partials ====
         # Link the newly created partials to the plan. There are needed later for caba exchange entries.

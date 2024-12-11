@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 from odoo import api, fields, models, _
 
 
@@ -11,3 +13,4 @@ class Lead(models.Model):
                 lead.company_currency = self.env.company.currency_id_dif
             else:
                 lead.company_currency = lead.company_id.currency_id_dif
+                
