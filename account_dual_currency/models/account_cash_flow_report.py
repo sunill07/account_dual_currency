@@ -2,251 +2,261 @@
 
 from odoo import models, fields, api, _
 from odoo.tools.misc import get_lang
+from odoo.tools import SQL
+
 
 
 class CashFlowReportCustomHandler(models.AbstractModel):
     _inherit = 'account.cash.flow.report.handler'
 
-    def _compute_liquidity_balance(self, report, options, currency_table_query, payment_account_ids, date_scope):
+    # Migration Note: Done
+    def _compute_liquidity_balance(self, report, options, payment_account_ids, date_scope):
         ''' Compute the balance of all liquidity accounts to populate the following sections:
             'Cash and cash equivalents, beginning of period' and 'Cash and cash equivalents, closing balance'.
 
         :param options:                 The report options.
-        :param currency_table_query:    The custom query containing the multi-companies rates.
         :param payment_account_ids:     A tuple containing all account.account's ids being used in a liquidity journal.
         :return:                        A list of tuple (account_id, account_code, account_name, balance).
         '''
         queries = []
-        params = []
         currency_dif = options['currency_dif']
-        if self.pool['account.account'].name.translate:
-            lang = self.env.user.lang or get_lang(self.env).code
-            account_name = f"COALESCE(account_account.name->>'{lang}', account_account.name->>'en_US')"
-        else:
-            account_name = 'account_account.name'
 
         for column_group_key, column_group_options in report._split_options_per_column_group(options).items():
-            tables, where_clause, where_params = report._query_get(column_group_options, date_scope, domain=[('account_id', 'in', payment_account_ids)])
+            query = report._get_report_query(column_group_options, date_scope, domain=[('account_id', 'in', payment_account_ids)])
+            account_alias = query.join(lhs_alias='account_move_line', lhs_column='account_id', rhs_table='account_account', rhs_column='id', link='account_id')
+            account_name = self.env['account.account']._field_to_sql(account_alias, 'name')
+            account_code = self.env['account.account']._field_to_sql(account_alias, 'code', query)
             if currency_dif == self.env.company.currency_id.symbol:
-                queries.append(f'''
+                queries.append(SQL(
+                    '''
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         account_move_line.account_id,
-                        account_account.code AS account_code,
-                        {account_name} AS account_name,
-                        SUM(ROUND(account_move_line.balance * currency_table.rate, currency_table.precision)) AS balance
-                    FROM {tables}
-                    JOIN account_account
-                        ON account_account.id = account_move_line.account_id
-                    LEFT JOIN {currency_table_query}
-                        ON currency_table.company_id = account_move_line.company_id
-                    WHERE {where_clause}
-                    GROUP BY account_move_line.account_id, account_account.code, account_name
-                ''')
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        SUM(%(balance_select)s) AS balance
+                    FROM %(table_references)s
+                    %(currency_table_join)s
+                    WHERE %(search_condition)s
+                    GROUP BY account_move_line.account_id, account_code, account_name
+                    ''',
+                    column_group_key=column_group_key,
+                    account_code=account_code,
+                    account_name=account_name,
+                    table_references=query.from_clause,
+                    balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance")),
+                    currency_table_join=report._currency_table_aml_join(column_group_options),
+                    search_condition=query.where_clause,
+                ))
             else:
-                queries.append(f'''
-                                    SELECT
-                                        %s AS column_group_key,
-                                        account_move_line.account_id,
-                                        account_account.code AS account_code,
-                                        {account_name} AS account_name,
-                                        SUM(ROUND(account_move_line.balance_usd, currency_table.precision)) AS balance
-                                    FROM {tables}
-                                    JOIN account_account
-                                        ON account_account.id = account_move_line.account_id
-                                    LEFT JOIN {currency_table_query}
-                                        ON currency_table.company_id = account_move_line.company_id
-                                    WHERE {where_clause}
-                                    GROUP BY account_move_line.account_id, account_account.code, account_name
-                                ''')
+                queries.append(SQL(
+                    '''
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        account_move_line.account_id,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        SUM(%(balance_select)s) AS balance
+                    FROM %(table_references)s
+                    %(currency_table_join)s
+                    WHERE %(search_condition)s
+                    GROUP BY account_move_line.account_id, account_code, account_name
+                    ''',
+                    column_group_key=column_group_key,
+                    account_code=account_code,
+                    account_name=account_name,
+                    table_references=query.from_clause,
+                    balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance_usd")),
+                    currency_table_join=report._currency_table_aml_join(column_group_options),
+                    search_condition=query.where_clause,
+                ))
 
-            params += [column_group_key, *where_params]
 
-        self._cr.execute(' UNION ALL '.join(queries), params)
+        self._cr.execute(SQL(' UNION ALL ').join(queries))
 
         return self._cr.dictfetchall()
 
-    def _get_liquidity_moves(self, report, options, currency_table_query, payment_account_ids, payment_move_ids):
+    # Migration Note: Done
+    def _get_liquidity_moves(self, report, options, payment_account_ids, cash_flow_tag_ids):
         ''' Fetch all information needed to compute lines from liquidity moves.
         The difficulty is to represent only the not-reconciled part of balance.
 
         :param options:                 The report options.
-        :param currency_table_query:    The floating query to handle a multi-company/multi-currency environment.
-        :param payment_move_ids:        A tuple containing all account.move's ids being the liquidity moves.
         :param payment_account_ids:     A tuple containing all account.account's ids being used in a liquidity journal.
         :return:                        A list of tuple (account_id, account_code, account_name, account_type, amount).
         '''
-        if not payment_move_ids:
-            return []
 
         reconciled_aml_groupby_account = {}
 
         queries = []
-        params = []
         currency_dif = options['currency_dif']
-        if self.pool['account.account'].name.translate:
-            lang = self.env.user.lang or get_lang(self.env).code
-            account_name = f"COALESCE(account_account.name->>'{lang}', account_account.name->>'en_US')"
-        else:
-            account_name = 'account_account.name'
 
         for column_group_key, column_group_options in report._split_options_per_column_group(options).items():
+            move_ids_query = self._get_move_ids_query(report, payment_account_ids, column_group_options)
+            query = Query(self.env, 'account_move_line')
+            account_alias = query.join(lhs_alias='account_move_line', lhs_column='account_id', rhs_table='account_account', rhs_column='id', link='account_id')
+            account_code = self.env['account.account']._field_to_sql(account_alias, 'code', query)
+            account_name = self.env['account.account']._field_to_sql(account_alias, 'name')
+            account_type = SQL.identifier(account_alias, 'account_type')
             if currency_dif == self.env.company.currency_id.symbol:
-                queries.append(f'''
+                queries.append(SQL(
+                    '''
                     -- Credit amount of each account
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         account_move_line.account_id,
-                        account_account.code AS account_code,
-                        {account_name} AS account_name,
-                        account_account.account_type AS account_account_type,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
                         account_account_account_tag.account_account_tag_id AS account_tag_id,
-                        SUM(ROUND(account_partial_reconcile.amount * currency_table.rate, currency_table.precision)) AS balance
-                    FROM account_move_line
-                    LEFT JOIN {currency_table_query}
-                        ON currency_table.company_id = account_move_line.company_id
+                        SUM(%(partial_amount_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
                     LEFT JOIN account_partial_reconcile
                         ON account_partial_reconcile.credit_move_id = account_move_line.id
-                    JOIN account_account
-                        ON account_account.id = account_move_line.account_id
                     LEFT JOIN account_account_account_tag
                         ON account_account_account_tag.account_account_id = account_move_line.account_id
-                    WHERE account_move_line.move_id IN %s
-                        AND account_move_line.account_id NOT IN %s
-                        AND account_partial_reconcile.max_date BETWEEN %s AND %s
-                    GROUP BY account_move_line.company_id, account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
-    
+                    WHERE account_move_line.move_id IN %(cash_flow_tag_ids)s
+                        AND account_move_line.account_id NOT IN %(payment_account_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
+                    GROUP BY account_move_line.company_id, account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id
+
                     UNION ALL
-    
+
                     -- Debit amount of each account
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         account_move_line.account_id,
-                        account_account.code AS account_code,
-                        {account_name} AS account_name,
-                        account_account.account_type AS account_account_type,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
                         account_account_account_tag.account_account_tag_id AS account_tag_id,
-                        -SUM(ROUND(account_partial_reconcile.amount * currency_table.rate, currency_table.precision)) AS balance
-                    FROM account_move_line
-                    LEFT JOIN {currency_table_query}
-                        ON currency_table.company_id = account_move_line.company_id
+                        -SUM(%(partial_amount_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
                     LEFT JOIN account_partial_reconcile
                         ON account_partial_reconcile.debit_move_id = account_move_line.id
-                    JOIN account_account
-                        ON account_account.id = account_move_line.account_id
                     LEFT JOIN account_account_account_tag
                         ON account_account_account_tag.account_account_id = account_move_line.account_id
-                    WHERE account_move_line.move_id IN %s
-                        AND account_move_line.account_id NOT IN %s
-                        AND account_partial_reconcile.max_date BETWEEN %s AND %s
-                    GROUP BY account_move_line.company_id, account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
-    
+                    WHERE account_move_line.move_id IN %(cash_flow_tag_ids)s
+                        AND account_move_line.account_id NOT IN %(payment_account_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
+                    GROUP BY account_move_line.company_id, account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id
+
                     UNION ALL
-    
+
                     -- Total amount of each account
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         account_move_line.account_id AS account_id,
-                        account_account.code AS account_code,
-                        {account_name} AS account_name,
-                        account_account.account_type AS account_account_type,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
                         account_account_account_tag.account_account_tag_id AS account_tag_id,
-                        SUM(ROUND(account_move_line.balance * currency_table.rate, currency_table.precision)) AS balance
-                    FROM account_move_line
-                    LEFT JOIN {currency_table_query}
-                        ON currency_table.company_id = account_move_line.company_id
-                    JOIN account_account
-                        ON account_account.id = account_move_line.account_id
+                        SUM(%(aml_balance_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
                     LEFT JOIN account_account_account_tag
                         ON account_account_account_tag.account_account_id = account_move_line.account_id
-                    WHERE account_move_line.move_id IN %s
-                        AND account_move_line.account_id NOT IN %s
-                    GROUP BY account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
-                ''')
+                    WHERE account_move_line.move_id IN %(cash_flow_tag_ids)s
+                        AND account_move_line.account_id NOT IN %(payment_account_ids)s
+                    GROUP BY account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id)
+                    ''',
+                    column_group_key=column_group_key,
+                    account_code=account_code,
+                    account_name=account_name,
+                    account_type=account_type,
+                    from_clause=query.from_clause,
+                    currency_table_join=report._currency_table_aml_join(column_group_options),
+                    partial_amount_select=report._currency_table_apply_rate(SQL("account_partial_reconcile.amount_usd")),
+                    aml_balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance_usd")),
+                    cash_flow_tag_ids=tuple(payment_move_ids.get(column_group_key, [None])),
+
+                    payment_account_ids=payment_account_ids,
+                    date_from=column_group_options['date']['date_from'],
+                    date_to=column_group_options['date']['date_to'],
+                ))
             else:
-                queries.append(f'''
-                                   -- Credit amount of each account
-                                   SELECT
-                                       %s AS column_group_key,
-                                       account_move_line.account_id,
-                                       account_account.code AS account_code,
-                                       {account_name} AS account_name,
-                                       account_account.account_type AS account_account_type,
-                                       account_account_account_tag.account_account_tag_id AS account_tag_id,
-                                       SUM(ROUND(account_partial_reconcile.amount_usd, currency_table.precision)) AS balance
-                                   FROM account_move_line
-                                   LEFT JOIN {currency_table_query}
-                                       ON currency_table.company_id = account_move_line.company_id
-                                   LEFT JOIN account_partial_reconcile
-                                       ON account_partial_reconcile.credit_move_id = account_move_line.id
-                                   JOIN account_account
-                                       ON account_account.id = account_move_line.account_id
-                                   LEFT JOIN account_account_account_tag
-                                       ON account_account_account_tag.account_account_id = account_move_line.account_id
-                                   WHERE account_move_line.move_id IN %s
-                                       AND account_move_line.account_id NOT IN %s
-                                       AND account_partial_reconcile.max_date BETWEEN %s AND %s
-                                   GROUP BY account_move_line.company_id, account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
+                queries.append(SQL(
+                    '''
+                    -- Credit amount of each account
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        account_move_line.account_id,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
+                        account_account_account_tag.account_account_tag_id AS account_tag_id,
+                        SUM(%(partial_amount_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
+                    LEFT JOIN account_partial_reconcile
+                        ON account_partial_reconcile.credit_move_id = account_move_line.id
+                    LEFT JOIN account_account_account_tag
+                        ON account_account_account_tag.account_account_id = account_move_line.account_id
+                    WHERE account_move_line.move_id IN %(cash_flow_tag_ids)s
+                        AND account_move_line.account_id NOT IN %(payment_account_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
+                    GROUP BY account_move_line.company_id, account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id
 
-                                   UNION ALL
+                    UNION ALL
 
-                                   -- Debit amount of each account
-                                   SELECT
-                                       %s AS column_group_key,
-                                       account_move_line.account_id,
-                                       account_account.code AS account_code,
-                                       {account_name} AS account_name,
-                                       account_account.account_type AS account_account_type,
-                                       account_account_account_tag.account_account_tag_id AS account_tag_id,
-                                       -SUM(ROUND(account_partial_reconcile.amount_usd, currency_table.precision)) AS balance
-                                   FROM account_move_line
-                                   LEFT JOIN {currency_table_query}
-                                       ON currency_table.company_id = account_move_line.company_id
-                                   LEFT JOIN account_partial_reconcile
-                                       ON account_partial_reconcile.debit_move_id = account_move_line.id
-                                   JOIN account_account
-                                       ON account_account.id = account_move_line.account_id
-                                   LEFT JOIN account_account_account_tag
-                                       ON account_account_account_tag.account_account_id = account_move_line.account_id
-                                   WHERE account_move_line.move_id IN %s
-                                       AND account_move_line.account_id NOT IN %s
-                                       AND account_partial_reconcile.max_date BETWEEN %s AND %s
-                                   GROUP BY account_move_line.company_id, account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
+                    -- Debit amount of each account
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        account_move_line.account_id,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
+                        account_account_account_tag.account_account_tag_id AS account_tag_id,
+                        -SUM(%(partial_amount_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
+                    LEFT JOIN account_partial_reconcile
+                        ON account_partial_reconcile.debit_move_id = account_move_line.id
+                    LEFT JOIN account_account_account_tag
+                        ON account_account_account_tag.account_account_id = account_move_line.account_id
+                    WHERE account_move_line.move_id IN %(cash_flow_tag_ids)s
+                        AND account_move_line.account_id NOT IN %(payment_account_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
+                    GROUP BY account_move_line.company_id, account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id
 
-                                   UNION ALL
+                    UNION ALL
 
-                                   -- Total amount of each account
-                                   SELECT
-                                       %s AS column_group_key,
-                                       account_move_line.account_id AS account_id,
-                                       account_account.code AS account_code,
-                                       {account_name} AS account_name,
-                                       account_account.account_type AS account_account_type,
-                                       account_account_account_tag.account_account_tag_id AS account_tag_id,
-                                       SUM(ROUND(account_move_line.balance_usd, currency_table.precision)) AS balance
-                                   FROM account_move_line
-                                   LEFT JOIN {currency_table_query}
-                                       ON currency_table.company_id = account_move_line.company_id
-                                   JOIN account_account
-                                       ON account_account.id = account_move_line.account_id
-                                   LEFT JOIN account_account_account_tag
-                                       ON account_account_account_tag.account_account_id = account_move_line.account_id
-                                   WHERE account_move_line.move_id IN %s
-                                       AND account_move_line.account_id NOT IN %s
-                                   GROUP BY account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
-                               ''')
+                    -- Total amount of each account
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        account_move_line.account_id AS account_id,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
+                        account_account_account_tag.account_account_tag_id AS account_tag_id,
+                        SUM(%(aml_balance_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
+                    LEFT JOIN account_account_account_tag
+                        ON account_account_account_tag.account_account_id = account_move_line.account_id
+                    WHERE account_move_line.move_id IN %(cash_flow_tag_ids)s
+                        AND account_move_line.account_id NOT IN %(payment_account_ids)s
+                    GROUP BY account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id)
+                    ''',
+                    column_group_key=column_group_key,
+                    account_code=account_code,
+                    account_name=account_name,
+                    account_type=account_type,
+                    from_clause=query.from_clause,
+                    currency_table_join=report._currency_table_aml_join(column_group_options),
+                    partial_amount_select=report._currency_table_apply_rate(SQL("account_partial_reconcile.amount")),
+                    aml_balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance")),
+                    cash_flow_tag_ids=tuple(payment_move_ids.get(column_group_key, [None])),
 
-            date_from = column_group_options['date']['date_from']
-            date_to = column_group_options['date']['date_to']
+                    payment_account_ids=payment_account_ids,
+                    date_from=column_group_options['date']['date_from'],
+                    date_to=column_group_options['date']['date_to'],
+                ))
 
-            column_group_payment_move_ids = tuple(payment_move_ids.get(column_group_key, [None]))
-            params += [
-                column_group_key, column_group_payment_move_ids, payment_account_ids, date_from, date_to,
-                column_group_key, column_group_payment_move_ids, payment_account_ids, date_from, date_to,
-                column_group_key, column_group_payment_move_ids, payment_account_ids
-            ]
 
-        self._cr.execute(' UNION ALL '.join(queries), params)
+        self._cr.execute(SQL(' UNION ALL ').join(queries))
 
         for aml_data in self._cr.dictfetchall():
             reconciled_aml_groupby_account.setdefault(aml_data['account_id'], {})
@@ -264,116 +274,136 @@ class CashFlowReportCustomHandler(models.AbstractModel):
 
         return list(reconciled_aml_groupby_account.values())
 
-    def _get_reconciled_moves(self, report, options, currency_table_query, payment_account_ids, payment_move_ids):
+
+    def _get_reconciled_moves(self, report, options, payment_account_ids, cash_flow_tag_ids):
         ''' Retrieve all moves being not a liquidity move to be shown in the cash flow statement.
         Each amount must be valued at the percentage of what is actually paid.
         E.g. An invoice of 1000 being paid at 50% must be valued at 500.
 
         :param options:                 The report options.
-        :param currency_table_query:    The floating query to handle a multi-company/multi-currency environment.
-        :param payment_move_ids:        A tuple containing all account.move's ids being the liquidity moves.
         :param payment_account_ids:     A tuple containing all account.account's ids being used in a liquidity journal.
         :return:                        A list of tuple (account_id, account_code, account_name, account_type, amount).
         '''
-        if not payment_move_ids:
-            return []
 
-        reconciled_account_ids = {}
-        reconciled_percentage_per_move = {}
+        reconciled_account_ids = {column_group_key: set() for column_group_key in options['column_groups']}
+        reconciled_percentage_per_move = {column_group_key: {} for column_group_key in options['column_groups']}
+        currency_table = report._get_currency_table(options)
 
         queries = []
-        params = []
         currency_dif = options['currency_dif']
+
         for column_group_key, column_group_options in report._split_options_per_column_group(options).items():
+            move_ids_query = self._get_move_ids_query(report, payment_account_ids, column_group_options)
             if currency_dif == self.env.company.currency_id.symbol:
-                queries.append('''
+
+                queries.append(SQL(
+                    '''
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         debit_line.move_id,
                         debit_line.account_id,
-                        SUM(account_partial_reconcile.amount) AS balance
+                        SUM(%(partial_amount)s) AS balance
                     FROM account_move_line AS credit_line
                     LEFT JOIN account_partial_reconcile
                         ON account_partial_reconcile.credit_move_id = credit_line.id
+                    JOIN %(currency_table)s
+                        ON account_currency_table.company_id = account_partial_reconcile.company_id
+                        AND account_currency_table.rate_type = 'current' -- For payable/receivable accounts it'll always be 'current' anyway
                     INNER JOIN account_move_line AS debit_line
                         ON debit_line.id = account_partial_reconcile.debit_move_id
-                    WHERE credit_line.move_id IN %s
-                        AND credit_line.account_id NOT IN %s
+                    WHERE credit_line.move_id IN %(column_group_payment_move_ids)s
+                        AND credit_line.account_id NOT IN %(payment_account_ids)s
                         AND credit_line.credit > 0.0
-                        AND debit_line.move_id NOT IN %s
-                        AND account_partial_reconcile.max_date BETWEEN %s AND %s
+                        AND debit_line.move_id NOT IN %(column_group_payment_move_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
                     GROUP BY debit_line.move_id, debit_line.account_id
-    
+
                     UNION ALL
-    
+
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         credit_line.move_id,
                         credit_line.account_id,
-                        -SUM(account_partial_reconcile.amount) AS balance
+                        -SUM(%(partial_amount)s) AS balance
                     FROM account_move_line AS debit_line
                     LEFT JOIN account_partial_reconcile
                         ON account_partial_reconcile.debit_move_id = debit_line.id
+                    JOIN %(currency_table)s
+                        ON account_currency_table.company_id = account_partial_reconcile.company_id
+                        AND account_currency_table.rate_type = 'current' -- For payable/receivable accounts it'll always be 'current' anyway
                     INNER JOIN account_move_line AS credit_line
                         ON credit_line.id = account_partial_reconcile.credit_move_id
-                    WHERE debit_line.move_id IN %s
-                        AND debit_line.account_id NOT IN %s
+                    WHERE debit_line.move_id IN  %(column_group_payment_move_ids)s
+                        AND debit_line.account_id NOT IN %(payment_account_ids)s
                         AND debit_line.debit > 0.0
-                        AND credit_line.move_id NOT IN %s
-                        AND account_partial_reconcile.max_date BETWEEN %s AND %s
-                    GROUP BY credit_line.move_id, credit_line.account_id
-                ''')
+                        AND credit_line.move_id NOT IN %(column_group_payment_move_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
+                    GROUP BY credit_line.move_id, credit_line.account_id)
+                    ''',
+                    column_group_key=column_group_key,
+                    column_group_payment_move_ids=column_group_payment_move_ids,
+                    payment_account_ids=payment_account_ids,
+                    date_from=column_group_options['date']['date_from'],
+                    date_to=column_group_options['date']['date_to'],
+                    currency_table=currency_table,
+                    partial_amount=report._currency_table_apply_rate(SQL("account_partial_reconcile.amount")),
+                ))
             else:
-                queries.append('''
-                                    SELECT
-                                        %s AS column_group_key,
-                                        debit_line.move_id,
-                                        debit_line.account_id,
-                                        SUM(account_partial_reconcile.amount_usd) AS balance
-                                    FROM account_move_line AS credit_line
-                                    LEFT JOIN account_partial_reconcile
-                                        ON account_partial_reconcile.credit_move_id = credit_line.id
-                                    INNER JOIN account_move_line AS debit_line
-                                        ON debit_line.id = account_partial_reconcile.debit_move_id
-                                    WHERE credit_line.move_id IN %s
-                                        AND credit_line.account_id NOT IN %s
-                                        AND credit_line.credit_usd > 0.0
-                                        AND debit_line.move_id NOT IN %s
-                                        AND account_partial_reconcile.max_date BETWEEN %s AND %s
-                                    GROUP BY debit_line.move_id, debit_line.account_id
+                queries.append(SQL(
+                    '''
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        debit_line.move_id,
+                        debit_line.account_id,
+                        SUM(%(partial_amount)s) AS balance
+                    FROM account_move_line AS credit_line
+                    LEFT JOIN account_partial_reconcile
+                        ON account_partial_reconcile.credit_move_id = credit_line.id
+                    JOIN %(currency_table)s
+                        ON account_currency_table.company_id = account_partial_reconcile.company_id
+                        AND account_currency_table.rate_type = 'current' -- For payable/receivable accounts it'll always be 'current' anyway
+                    INNER JOIN account_move_line AS debit_line
+                        ON debit_line.id = account_partial_reconcile.debit_move_id
+                    WHERE credit_line.move_id IN %(column_group_payment_move_ids)s
+                        AND credit_line.account_id NOT IN %(payment_account_ids)s
+                        AND credit_line.credit_usd > 0.0
+                        AND debit_line.move_id NOT IN %(column_group_payment_move_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
+                    GROUP BY debit_line.move_id, debit_line.account_id
 
-                                    UNION ALL
+                    UNION ALL
 
-                                    SELECT
-                                        %s AS column_group_key,
-                                        credit_line.move_id,
-                                        credit_line.account_id,
-                                        -SUM(account_partial_reconcile.amount_usd) AS balance
-                                    FROM account_move_line AS debit_line
-                                    LEFT JOIN account_partial_reconcile
-                                        ON account_partial_reconcile.debit_move_id = debit_line.id
-                                    INNER JOIN account_move_line AS credit_line
-                                        ON credit_line.id = account_partial_reconcile.credit_move_id
-                                    WHERE debit_line.move_id IN %s
-                                        AND debit_line.account_id NOT IN %s
-                                        AND debit_line.debit_usd > 0.0
-                                        AND credit_line.move_id NOT IN %s
-                                        AND account_partial_reconcile.max_date BETWEEN %s AND %s
-                                    GROUP BY credit_line.move_id, credit_line.account_id
-                                ''')
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        credit_line.move_id,
+                        credit_line.account_id,
+                        -SUM(%(partial_amount)s) AS balance
+                    FROM account_move_line AS debit_line
+                    LEFT JOIN account_partial_reconcile
+                        ON account_partial_reconcile.debit_move_id = debit_line.id
+                    JOIN %(currency_table)s
+                        ON account_currency_table.company_id = account_partial_reconcile.company_id
+                        AND account_currency_table.rate_type = 'current' -- For payable/receivable accounts it'll always be 'current' anyway
+                    INNER JOIN account_move_line AS credit_line
+                        ON credit_line.id = account_partial_reconcile.credit_move_id
+                    WHERE debit_line.move_id IN  %(column_group_payment_move_ids)s
+                        AND debit_line.account_id NOT IN %(payment_account_ids)s
+                        AND debit_line.debit_usd > 0.0
+                        AND credit_line.move_id NOT IN %(column_group_payment_move_ids)s
+                        AND account_partial_reconcile.max_date BETWEEN %(date_from)s AND %(date_to)s
+                    GROUP BY credit_line.move_id, credit_line.account_id)
+                    ''',
+                    column_group_key=column_group_key,
+                    column_group_payment_move_ids=column_group_payment_move_ids,
+                    payment_account_ids=payment_account_ids,
+                    date_from=column_group_options['date']['date_from'],
+                    date_to=column_group_options['date']['date_to'],
+                    currency_table=currency_table,
+                    partial_amount=report._currency_table_apply_rate(SQL("account_partial_reconcile.amount_usd")),
+                ))
 
-            column_group_payment_move_ids = tuple(payment_move_ids.get(column_group_key, [None]))
 
-            params += [
-                column_group_key,
-                column_group_payment_move_ids,
-                payment_account_ids,
-                column_group_payment_move_ids,
-                column_group_options['date']['date_from'],
-                column_group_options['date']['date_to'],
-            ] * 2
-
-        self._cr.execute(' UNION ALL '.join(queries), params)
+        self._cr.execute(SQL(' UNION ALL ').join(queries))
 
         for aml_data in self._cr.dictfetchall():
             reconciled_percentage_per_move.setdefault(aml_data['column_group_key'], {})
@@ -388,41 +418,55 @@ class CashFlowReportCustomHandler(models.AbstractModel):
             return []
 
         queries = []
-        params = []
 
         for column in options['columns']:
             if currency_dif == self.env.company.currency_id.symbol:
-                queries.append(f'''
+                queries.append(SQL(
+                    '''
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         account_move_line.move_id,
                         account_move_line.account_id,
-                        SUM(account_move_line.balance) AS balance
+                        SUM(%(balance_select)s) AS balance
                     FROM account_move_line
-                    JOIN {currency_table_query}
-                        ON currency_table.company_id = account_move_line.company_id
-                    WHERE account_move_line.move_id IN %s
-                        AND account_move_line.account_id IN %s
+                    JOIN %(currency_table)s
+                        ON account_currency_table.company_id = account_move_line.company_id
+                        AND account_currency_table.rate_type = 'current' -- For payable/receivable accounts it'll always be 'current' anyway
+                    WHERE account_move_line.move_id IN %(move_ids)s
+                        AND account_move_line.account_id IN %(account_ids)s
                     GROUP BY account_move_line.move_id, account_move_line.account_id
-                ''')
+                    ''',
+                    column_group_key=column['column_group_key'],
+                    currency_table=currency_table,
+                    balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance")),
+                    move_ids=tuple(reconciled_percentage_per_move[column['column_group_key']].keys()) or (None,),
+                    account_ids=tuple(reconciled_account_ids[column['column_group_key']]) or (None,)
+                ))
             else:
-                queries.append(f'''
-                                    SELECT
-                                        %s AS column_group_key,
-                                        account_move_line.move_id,
-                                        account_move_line.account_id,
-                                        SUM(account_move_line.balance_usd) AS balance
-                                    FROM account_move_line
-                                    JOIN {currency_table_query}
-                                        ON currency_table.company_id = account_move_line.company_id
-                                    WHERE account_move_line.move_id IN %s
-                                        AND account_move_line.account_id IN %s
-                                    GROUP BY account_move_line.move_id, account_move_line.account_id
-                                ''')
+                queries.append(SQL(
+                    '''
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        account_move_line.move_id,
+                        account_move_line.account_id,
+                        SUM(%(balance_select)s) AS balance
+                    FROM account_move_line
+                    JOIN %(currency_table)s
+                        ON account_currency_table.company_id = account_move_line.company_id
+                        AND account_currency_table.rate_type = 'current' -- For payable/receivable accounts it'll always be 'current' anyway
+                    WHERE account_move_line.move_id IN %(move_ids)s
+                        AND account_move_line.account_id IN %(account_ids)s
+                    GROUP BY account_move_line.move_id, account_move_line.account_id
+                    ''',
+                    column_group_key=column['column_group_key'],
+                    currency_table=currency_table,
+                    balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance_usd")),
+                    move_ids=tuple(reconciled_percentage_per_move[column['column_group_key']].keys()) or (None,),
+                    account_ids=tuple(reconciled_account_ids[column['column_group_key']]) or (None,)
+                ))
 
-            params += [column['column_group_key'], tuple(reconciled_percentage_per_move[column['column_group_key']].keys()), tuple(reconciled_account_ids[column['column_group_key']])]
 
-        self._cr.execute(' UNION ALL '.join(queries), params)
+        self._cr.execute(SQL(' UNION ALL ').join(queries))
 
         for aml_data in self._cr.dictfetchall():
             if aml_data['account_id'] in reconciled_percentage_per_move[aml_data['column_group_key']][aml_data['move_id']]:
@@ -431,60 +475,72 @@ class CashFlowReportCustomHandler(models.AbstractModel):
         reconciled_aml_per_account = {}
 
         queries = []
-        params = []
-        if self.pool['account.account'].name.translate:
-            lang = self.env.user.lang or get_lang(self.env).code
-            account_name = f"COALESCE(account_account.name->>'{lang}', account_account.name->>'en_US')"
-        else:
-            account_name = 'account_account.name'
+
+        query = Query(self.env, 'account_move_line')
+        account_alias = query.join(lhs_alias='account_move_line', lhs_column='account_id', rhs_table='account_account', rhs_column='id', link='account_id')
+        account_code = self.env['account.account']._field_to_sql(account_alias, 'code', query)
+        account_name = self.env['account.account']._field_to_sql(account_alias, 'name')
+        account_type = SQL.identifier(account_alias, 'account_type')
 
         for column in options['columns']:
             if currency_dif == self.env.company.currency_id.symbol:
-                queries.append(f'''
+                queries.append(SQL(
+                    '''
                     SELECT
-                        %s AS column_group_key,
+                        %(column_group_key)s AS column_group_key,
                         account_move_line.move_id,
                         account_move_line.account_id,
-                        account_account.code AS account_code,
-                        {account_name} AS account_name,
-                        account_account.account_type AS account_account_type,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
                         account_account_account_tag.account_account_tag_id AS account_tag_id,
-                        SUM(ROUND(account_move_line.balance * currency_table.rate, currency_table.precision)) AS balance
-                    FROM account_move_line
-                    LEFT JOIN {currency_table_query}
-                        ON currency_table.company_id = account_move_line.company_id
-                    JOIN account_account
-                        ON account_account.id = account_move_line.account_id
+                        SUM(%(balance_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
                     LEFT JOIN account_account_account_tag
                         ON account_account_account_tag.account_account_id = account_move_line.account_id
-                    WHERE account_move_line.move_id IN %s
-                    GROUP BY account_move_line.move_id, account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
-                ''')
+                    WHERE account_move_line.move_id IN %(move_ids)s
+                    GROUP BY account_move_line.move_id, account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id
+                    ''',
+                    column_group_key=column['column_group_key'],
+                    account_code=account_code,
+                    account_name=account_name,
+                    account_type=account_type,
+                    from_clause=query.from_clause,
+                    currency_table_join=report._currency_table_aml_join(options),
+                    balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance")),
+                    move_ids=tuple(reconciled_percentage_per_move[column['column_group_key']].keys()) or (None,)
+                ))
             else:
-                queries.append(f'''
-                                    SELECT
-                                        %s AS column_group_key,
-                                        account_move_line.move_id,
-                                        account_move_line.account_id,
-                                        account_account.code AS account_code,
-                                        {account_name} AS account_name,
-                                        account_account.account_type AS account_account_type,
-                                        account_account_account_tag.account_account_tag_id AS account_tag_id,
-                                        SUM(ROUND(account_move_line.balance_usd, currency_table.precision)) AS balance
-                                    FROM account_move_line
-                                    LEFT JOIN {currency_table_query}
-                                        ON currency_table.company_id = account_move_line.company_id
-                                    JOIN account_account
-                                        ON account_account.id = account_move_line.account_id
-                                    LEFT JOIN account_account_account_tag
-                                        ON account_account_account_tag.account_account_id = account_move_line.account_id
-                                    WHERE account_move_line.move_id IN %s
-                                    GROUP BY account_move_line.move_id, account_move_line.account_id, account_account.code, account_name, account_account.account_type, account_account_account_tag.account_account_tag_id
-                                ''')
+                queries.append(SQL(
+                    '''
+                    SELECT
+                        %(column_group_key)s AS column_group_key,
+                        account_move_line.move_id,
+                        account_move_line.account_id,
+                        %(account_code)s AS account_code,
+                        %(account_name)s AS account_name,
+                        %(account_type)s AS account_account_type,
+                        account_account_account_tag.account_account_tag_id AS account_tag_id,
+                        SUM(%(balance_select)s) AS balance
+                    FROM %(from_clause)s
+                    %(currency_table_join)s
+                    LEFT JOIN account_account_account_tag
+                        ON account_account_account_tag.account_account_id = account_move_line.account_id
+                    WHERE account_move_line.move_id IN %(move_ids)s
+                    GROUP BY account_move_line.move_id, account_move_line.account_id, account_code, account_name, account_account_type, account_account_account_tag.account_account_tag_id
+                    ''',
+                    column_group_key=column['column_group_key'],
+                    account_code=account_code,
+                    account_name=account_name,
+                    account_type=account_type,
+                    from_clause=query.from_clause,
+                    currency_table_join=report._currency_table_aml_join(options),
+                    balance_select=report._currency_table_apply_rate(SQL("account_move_line.balance_usd")),
+                    move_ids=tuple(reconciled_percentage_per_move[column['column_group_key']].keys()) or (None,)
+                ))
 
-            params += [column['column_group_key'], tuple(reconciled_percentage_per_move[column['column_group_key']].keys())]
-
-        self._cr.execute(' UNION ALL '.join(queries), params)
+        self._cr.execute(SQL(' UNION ALL ').join(queries))
 
         for aml_data in self._cr.dictfetchall():
             aml_column_group_key = aml_data['column_group_key']

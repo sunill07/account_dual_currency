@@ -17,21 +17,22 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
         # Fetch the group of taxes.
         # If all child taxes have a 'none' type_tax_use, all amounts are aggregated and only the group appears on the report.
         currency_dif = options['currency_dif']
-        self._cr.execute(
+        self._cr.execute(SQL(
             '''
                 SELECT
-                    group_tax.id,
-                    group_tax.type_tax_use,
+                    account_tax.id,
+                    account_tax.type_tax_use,
                     ARRAY_AGG(child_tax.id) AS child_tax_ids,
                     ARRAY_AGG(DISTINCT child_tax.type_tax_use) AS child_types
-                FROM account_tax_filiation_rel group_tax_rel
-                JOIN account_tax group_tax ON group_tax.id = group_tax_rel.parent_tax
-                JOIN account_tax child_tax ON child_tax.id = group_tax_rel.child_tax
-                WHERE group_tax.amount_type = 'group' AND group_tax.company_id IN %s
-                GROUP BY group_tax.id
-            ''',
-            [tuple(comp['id'] for comp in options.get('multi_company', self.env.company))],
-        )
+                FROM account_tax_filiation_rel account_tax_rel
+                JOIN account_tax ON account_tax.id = account_tax_rel.parent_tax
+                JOIN account_tax child_tax ON child_tax.id = account_tax_rel.child_tax
+                WHERE account_tax.amount_type = 'group'
+                AND group_tax.company_id IN %s
+                GROUP BY account_tax.id
+            ''', [tuple(comp['id'] for comp in options.get('multi_company', self.env.company))]
+        ))
+
         group_of_taxes_info = {}
         child_to_group_of_taxes = {}
         for row in self._cr.dictfetchall():
@@ -39,7 +40,7 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
             group_of_taxes_info[row['id']] = row
             for child_id in row['child_tax_ids']:
                 child_to_group_of_taxes[child_id] = row['id']
-
+        # change
         results = defaultdict(lambda: {  # key: type_tax_use
             'base_amount': {column_group_key: 0.0 for column_group_key in options['column_groups']},
             'tax_amount': {column_group_key: 0.0 for column_group_key in options['column_groups']},
@@ -50,91 +51,97 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
         })
 
         for column_group_key, options in options_by_column_group.items():
-            tables, where_clause, where_params = report._query_get(options, 'strict_range')
+            query = report._get_report_query(options, 'strict_range')
 
             # Fetch the base amounts.
             if currency_dif == self.env.company.currency_id.symbol:
-                self._cr.execute(f'''
-                        SELECT
-                            tax.id AS tax_id,
-                            tax.type_tax_use AS tax_type_tax_use,
-                            src_group_tax.id AS src_group_tax_id,
-                            src_group_tax.type_tax_use AS src_group_tax_type_tax_use,
-                            src_tax.id AS src_tax_id,
-                            src_tax.type_tax_use AS src_tax_type_tax_use,
-                            SUM(account_move_line.balance) AS base_amount
-                        FROM {tables}
-                        JOIN account_move_line_account_tax_rel tax_rel ON account_move_line.id = tax_rel.account_move_line_id
-                        JOIN account_tax tax ON tax.id = tax_rel.account_tax_id
-                        LEFT JOIN account_tax src_tax ON src_tax.id = account_move_line.tax_line_id
-                        LEFT JOIN account_tax src_group_tax ON src_group_tax.id = account_move_line.group_tax_id
-                        WHERE {where_clause}
+                self._cr.execute(SQL(
+                '''
+                SELECT
+                    tax.id AS tax_id,
+                    tax.type_tax_use AS tax_type_tax_use,
+                    src_group_tax.id AS src_group_tax_id,
+                    src_group_tax.type_tax_use AS src_group_tax_type_tax_use,
+                    src_tax.id AS src_tax_id,
+                    src_tax.type_tax_use AS src_tax_type_tax_use,
+                    SUM(account_move_line.balance) AS base_amount
+                FROM %(table_references)s
+                JOIN account_move_line_account_tax_rel tax_rel ON account_move_line.id = tax_rel.account_move_line_id
+                JOIN account_tax tax ON tax.id = tax_rel.account_tax_id
+                LEFT JOIN account_tax src_tax ON src_tax.id = account_move_line.tax_line_id
+                LEFT JOIN account_tax src_group_tax ON src_group_tax.id = account_move_line.group_tax_id
+                WHERE %(search_condition)s
+                    AND (
+                        /* CABA */
+                        account_move_line__move_id.always_tax_exigible
+                        OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
+                        OR tax.tax_exigibility != 'on_payment'
+                    )
+                    AND (
+                        (
+                            /* Tax lines affecting the base of others. */
+                            account_move_line.tax_line_id IS NOT NULL
                             AND (
-                                /* CABA */
-                                account_move_line__move_id.always_tax_exigible
-                                OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
-                                OR tax.tax_exigibility != 'on_payment'
+                                src_tax.type_tax_use IN ('sale', 'purchase')
+                                OR src_group_tax.type_tax_use IN ('sale', 'purchase')
                             )
-                            AND (
-                                (
-                                    /* Tax lines affecting the base of others. */
-                                    account_move_line.tax_line_id IS NOT NULL
-                                    AND (
-                                        src_tax.type_tax_use IN ('sale', 'purchase')
-                                        OR src_group_tax.type_tax_use IN ('sale', 'purchase')
-                                    )
-                                )
-                                OR
-                                (
-                                    /* For regular base lines. */
-                                    account_move_line.tax_line_id IS NULL
-                                    AND tax.type_tax_use IN ('sale', 'purchase')
-                                )
-                            )
-                        GROUP BY tax.id, src_group_tax.id, src_tax.id
-                        ORDER BY src_group_tax.sequence, src_group_tax.id, src_tax.sequence, src_tax.id, tax.sequence, tax.id
-                    ''', where_params)
+                        )
+                        OR
+                        (
+                            /* For regular base lines. */
+                            account_move_line.tax_line_id IS NULL
+                            AND tax.type_tax_use IN ('sale', 'purchase')
+                        )
+                    )
+                GROUP BY tax.id, src_group_tax.id, src_tax.id
+                ORDER BY src_group_tax.sequence, src_group_tax.id, src_tax.sequence, src_tax.id, tax.sequence, tax.id
+                ''',
+                table_references=query.from_clause,
+                search_condition=query.where_clause,))
             else:
-                self._cr.execute(f'''
-                                        SELECT
-                                            tax.id AS tax_id,
-                                            tax.type_tax_use AS tax_type_tax_use,
-                                            src_group_tax.id AS src_group_tax_id,
-                                            src_group_tax.type_tax_use AS src_group_tax_type_tax_use,
-                                            src_tax.id AS src_tax_id,
-                                            src_tax.type_tax_use AS src_tax_type_tax_use,
-                                            SUM(account_move_line.balance_usd) AS base_amount
-                                        FROM {tables}
-                                        JOIN account_move_line_account_tax_rel tax_rel ON account_move_line.id = tax_rel.account_move_line_id
-                                        JOIN account_tax tax ON tax.id = tax_rel.account_tax_id
-                                        LEFT JOIN account_tax src_tax ON src_tax.id = account_move_line.tax_line_id
-                                        LEFT JOIN account_tax src_group_tax ON src_group_tax.id = account_move_line.group_tax_id
-                                        WHERE {where_clause}
-                                            AND (
-                                                /* CABA */
-                                                account_move_line__move_id.always_tax_exigible
-                                                OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
-                                                OR tax.tax_exigibility != 'on_payment'
-                                            )
-                                            AND (
-                                                (
-                                                    /* Tax lines affecting the base of others. */
-                                                    account_move_line.tax_line_id IS NOT NULL
-                                                    AND (
-                                                        src_tax.type_tax_use IN ('sale', 'purchase')
-                                                        OR src_group_tax.type_tax_use IN ('sale', 'purchase')
-                                                    )
-                                                )
-                                                OR
-                                                (
-                                                    /* For regular base lines. */
-                                                    account_move_line.tax_line_id IS NULL
-                                                    AND tax.type_tax_use IN ('sale', 'purchase')
-                                                )
-                                            )
-                                        GROUP BY tax.id, src_group_tax.id, src_tax.id
-                                        ORDER BY src_group_tax.sequence, src_group_tax.id, src_tax.sequence, src_tax.id, tax.sequence, tax.id
-                                    ''', where_params)
+                self._cr.execute(SQL(
+                '''
+                SELECT
+                    tax.id AS tax_id,
+                    tax.type_tax_use AS tax_type_tax_use,
+                    src_group_tax.id AS src_group_tax_id,
+                    src_group_tax.type_tax_use AS src_group_tax_type_tax_use,
+                    src_tax.id AS src_tax_id,
+                    src_tax.type_tax_use AS src_tax_type_tax_use,
+                    SUM(account_move_line.balance_usd) AS base_amount
+                FROM %(table_references)s
+                JOIN account_move_line_account_tax_rel tax_rel ON account_move_line.id = tax_rel.account_move_line_id
+                JOIN account_tax tax ON tax.id = tax_rel.account_tax_id
+                LEFT JOIN account_tax src_tax ON src_tax.id = account_move_line.tax_line_id
+                LEFT JOIN account_tax src_group_tax ON src_group_tax.id = account_move_line.group_tax_id
+                WHERE %(search_condition)s
+                    AND (
+                        /* CABA */
+                        account_move_line__move_id.always_tax_exigible
+                        OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
+                        OR tax.tax_exigibility != 'on_payment'
+                    )
+                    AND (
+                        (
+                            /* Tax lines affecting the base of others. */
+                            account_move_line.tax_line_id IS NOT NULL
+                            AND (
+                                src_tax.type_tax_use IN ('sale', 'purchase')
+                                OR src_group_tax.type_tax_use IN ('sale', 'purchase')
+                            )
+                        )
+                        OR
+                        (
+                            /* For regular base lines. */
+                            account_move_line.tax_line_id IS NULL
+                            AND tax.type_tax_use IN ('sale', 'purchase')
+                        )
+                    )
+                GROUP BY tax.id, src_group_tax.id, src_tax.id
+                ORDER BY src_group_tax.sequence, src_group_tax.id, src_tax.sequence, src_tax.id, tax.sequence, tax.id
+                ''',
+                table_references=query.from_clause,
+                search_condition=query.where_clause,))
 
             group_of_taxes_with_extra_base_amount = set()
             for row in self._cr.dictfetchall():
@@ -178,55 +185,62 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
 
             # Fetch the tax amounts.
             if currency_dif == self.env.company.currency_id.symbol:
-                self._cr.execute(f'''
-                        SELECT
-                            tax.id AS tax_id,
-                            tax.type_tax_use AS tax_type_tax_use,
-                            group_tax.id AS group_tax_id,
-                            group_tax.type_tax_use AS group_tax_type_tax_use,
-                            SUM(account_move_line.balance) AS tax_amount
-                        FROM {tables}
-                        JOIN account_tax tax ON tax.id = account_move_line.tax_line_id
-                        LEFT JOIN account_tax group_tax ON group_tax.id = account_move_line.group_tax_id
-                        WHERE {where_clause}
-                            AND (
-                                /* CABA */
-                                account_move_line__move_id.always_tax_exigible
-                                OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
-                                OR tax.tax_exigibility != 'on_payment'
-                            )
-                            AND (
-                                (group_tax.id IS NULL AND tax.type_tax_use IN ('sale', 'purchase'))
-                                OR
-                                (group_tax.id IS NOT NULL AND group_tax.type_tax_use IN ('sale', 'purchase'))
-                            )
-                        GROUP BY tax.id, group_tax.id
-                    ''', where_params)
+                self._cr.execute(SQL(
+                '''
+                SELECT
+                    tax.id AS tax_id,
+                    tax.type_tax_use AS tax_type_tax_use,
+                    group_tax.id AS group_tax_id,
+                    group_tax.type_tax_use AS group_tax_type_tax_use,
+                    SUM(account_move_line.balance) AS tax_amount
+                FROM %(table_references)s
+                JOIN account_tax tax ON tax.id = account_move_line.tax_line_id
+                LEFT JOIN account_tax group_tax ON group_tax.id = account_move_line.group_tax_id
+                WHERE %(search_condition)s
+                    AND (
+                        /* CABA */
+                        account_move_line__move_id.always_tax_exigible
+                        OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
+                        OR tax.tax_exigibility != 'on_payment'
+                    )
+                    AND (
+                        (group_tax.id IS NULL AND tax.type_tax_use IN ('sale', 'purchase'))
+                        OR
+                        (group_tax.id IS NOT NULL AND group_tax.type_tax_use IN ('sale', 'purchase'))
+                    )
+                GROUP BY tax.id, group_tax.id
+                ''',
+                table_references=query.from_clause,
+                search_condition=query.where_clause,))
+
             else:
-                self._cr.execute(f'''
-                                        SELECT
-                                            tax.id AS tax_id,
-                                            tax.type_tax_use AS tax_type_tax_use,
-                                            group_tax.id AS group_tax_id,
-                                            group_tax.type_tax_use AS group_tax_type_tax_use,
-                                            SUM(account_move_line.balance_usd) AS tax_amount
-                                        FROM {tables}
-                                        JOIN account_tax tax ON tax.id = account_move_line.tax_line_id
-                                        LEFT JOIN account_tax group_tax ON group_tax.id = account_move_line.group_tax_id
-                                        WHERE {where_clause}
-                                            AND (
-                                                /* CABA */
-                                                account_move_line__move_id.always_tax_exigible
-                                                OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
-                                                OR tax.tax_exigibility != 'on_payment'
-                                            )
-                                            AND (
-                                                (group_tax.id IS NULL AND tax.type_tax_use IN ('sale', 'purchase'))
-                                                OR
-                                                (group_tax.id IS NOT NULL AND group_tax.type_tax_use IN ('sale', 'purchase'))
-                                            )
-                                        GROUP BY tax.id, group_tax.id
-                                    ''', where_params)
+                self._cr.execute(SQL(
+                '''
+                SELECT
+                    tax.id AS tax_id,
+                    tax.type_tax_use AS tax_type_tax_use,
+                    group_tax.id AS group_tax_id,
+                    group_tax.type_tax_use AS group_tax_type_tax_use,
+                    SUM(account_move_line.balance_usd) AS tax_amount
+                FROM %(table_references)s
+                JOIN account_tax tax ON tax.id = account_move_line.tax_line_id
+                LEFT JOIN account_tax group_tax ON group_tax.id = account_move_line.group_tax_id
+                WHERE %(search_condition)s
+                    AND (
+                        /* CABA */
+                        account_move_line__move_id.always_tax_exigible
+                        OR account_move_line__move_id.tax_cash_basis_rec_id IS NOT NULL
+                        OR tax.tax_exigibility != 'on_payment'
+                    )
+                    AND (
+                        (group_tax.id IS NULL AND tax.type_tax_use IN ('sale', 'purchase'))
+                        OR
+                        (group_tax.id IS NOT NULL AND group_tax.type_tax_use IN ('sale', 'purchase'))
+                    )
+                GROUP BY tax.id, group_tax.id
+                ''',
+                table_references=query.from_clause,
+                search_condition=query.where_clause,))
 
             for row in self._cr.dictfetchall():
                 # Manage group of taxes.
@@ -245,6 +259,161 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
 
         return results
 
+    # @api.model
+    # def _compute_vat_closing_entry(self, company, options):
+    #     """Compute the VAT closing entry.
+
+    #     This method returns the one2many commands to balance the tax accounts for the selected period, and
+    #     a dictionnary that will help balance the different accounts set per tax group.
+    #     """
+    #     self = self.with_company(company)  # Needed to handle access to property fields correctly
+    #     currency_dif = options['currency_dif']
+    #     # first, for each tax group, gather the tax entries per tax and account
+    #     self.env['account.tax'].flush_model(['name', 'tax_group_id'])
+    #     self.env['account.tax.repartition.line'].flush_model(['use_in_tax_closing'])
+
+    #     # change
+    #     self.env['account.move.line'].flush_model(['account_id', 'debit', 'credit', 'move_id', 'tax_line_id', 'date', 'company_id', 'display_type'])
+    #     self.env['account.move'].flush_model(['state'])
+
+    #     # Check whether it is multilingual, in order to get the translation from the JSON value if present
+    #     lang = self.env.user.lang or get_lang(self.env).code
+    #     tax_name = f"COALESCE(tax.name->>'{lang}', tax.name->>'en_US')" if \
+    #         self.pool['account.tax'].name.translate else 'tax.name'
+
+    #     # change
+    #     if currency_dif == self.env.company.currency_id.symbol:
+    #         sql = f"""
+    #                 SELECT "account_move_line".tax_line_id as tax_id,
+    #                         tax.tax_group_id as tax_group_id,
+    #                         {tax_name} as tax_name,
+    #                         "account_move_line".account_id,
+    #                         COALESCE(SUM("account_move_line".balance), 0) as amount
+    #                 FROM account_tax tax, account_tax_repartition_line repartition, %s
+    #                 WHERE %s
+    #                   AND tax.id = "account_move_line".tax_line_id
+    #                   AND repartition.id = "account_move_line".tax_repartition_line_id
+    #                   AND repartition.use_in_tax_closing
+    #                 GROUP BY tax.tax_group_id, "account_move_line".tax_line_id, tax.name, "account_move_line".account_id
+    #             """
+    #     else:
+    #         sql = f"""
+    #                             SELECT "account_move_line".tax_line_id as tax_id,
+    #                                     tax.tax_group_id as tax_group_id,
+    #                                     {tax_name} as tax_name,
+    #                                     "account_move_line".account_id,
+    #                                     COALESCE(SUM("account_move_line".balance_usd), 0) as amount
+    #                             FROM account_tax tax, account_tax_repartition_line repartition, %s
+    #                             WHERE %s
+    #                               AND tax.id = "account_move_line".tax_line_id
+    #                               AND repartition.id = "account_move_line".tax_repartition_line_id
+    #                               AND repartition.use_in_tax_closing
+    #                             GROUP BY tax.tax_group_id, "account_move_line".tax_line_id, tax.name, "account_move_line".account_id
+    #                         """
+
+    #     # change
+    #     new_options = {
+    #         **options,
+    #         'all_entries': False,
+    #         'date': dict(options['date']),
+    #         'multi_company': [{'id': company.id, 'name': company.name}],
+    #     }
+
+    #     period_start, period_end = company._get_tax_closing_period_boundaries(
+    #         fields.Date.from_string(options['date']['date_to']))
+    #     new_options['date']['date_from'] = fields.Date.to_string(period_start)
+    #     new_options['date']['date_to'] = fields.Date.to_string(period_end)
+
+    #     tables, where_clause, where_params = self.env.ref('account.generic_tax_report')._query_get(
+    #         new_options,
+    #         'strict_range',
+    #         domain=self._get_vat_closing_entry_additional_domain()
+    #     )
+    #     query = sql % (tables, where_clause)
+    #     self.env.cr.execute(query, where_params)
+
+    #     # change
+    #     results = self.env.cr.dictfetchall()
+
+    #     tax_group_ids = [r['tax_group_id'] for r in results]
+    #     tax_groups = {}
+    #     for tg, result in zip(self.env['account.tax.group'].browse(tax_group_ids), results):
+    #         if tg not in tax_groups:
+    #             tax_groups[tg] = {}
+    #         if result.get('tax_id') not in tax_groups[tg]:
+    #             tax_groups[tg][result.get('tax_id')] = []
+    #         tax_groups[tg][result.get('tax_id')].append(
+    #             (result.get('tax_name'), result.get('account_id'), result.get('amount')))
+
+    #     # then loop on previous results to
+    #     #    * add the lines that will balance their sum per account
+    #     #    * make the total per tax group's account triplet
+    #     # (if 2 tax groups share the same 3 accounts, they should consolidate in the vat closing entry)
+    #     move_vals_lines = []
+    #     tax_group_subtotal = {}
+    #     currency = self.env.company.currency_id
+    #     for tg, values in tax_groups.items():
+    #         total = 0
+    #         # ignore line that have no property defined on tax group
+    #         # change
+    #         if not tg.property_tax_receivable_account_id or not tg.property_tax_payable_account_id:
+    #             continue
+    #         for dummy, value in values.items():
+    #             for v in value:
+    #                 tax_name, account_id, amt = v
+    #                 # Line to balance
+    #                 move_vals_lines.append((0, 0, {'name': tax_name, 'debit': abs(amt) if amt < 0 else 0,
+    #                                                'credit': amt if amt > 0 else 0, 'account_id': account_id}))
+    #                 total += amt
+
+    #         if not currency.is_zero(total):
+    #             # Add total to correct group
+    #             # change
+    #             key = (tg.property_advance_tax_payment_account_id.id or False, tg.property_tax_receivable_account_id.id,
+    #                    tg.property_tax_payable_account_id.id)
+
+    #             if tax_group_subtotal.get(key):
+    #                 tax_group_subtotal[key] += total
+    #             else:
+    #                 tax_group_subtotal[key] = total
+
+    #     # If the tax report is completely empty, we add two 0-valued lines, using the first in in and out
+    #     # account id we find on the taxes.
+    #     if len(move_vals_lines) == 0:
+    #         # change
+    #         rep_ln_in = self.env['account.tax.repartition.line'].search([
+    #             ('account_id.deprecated', '=', False),
+    #             ('repartition_type', '=', 'tax'),
+    #             ('company_id', '=', company.id),
+    #             ('invoice_tax_id.type_tax_use', '=', 'purchase')
+    #         ], limit=1)
+    #         # change
+    #         rep_ln_out = self.env['account.tax.repartition.line'].search([
+    #             ('account_id.deprecated', '=', False),
+    #             ('repartition_type', '=', 'tax'),
+    #             ('company_id', '=', company.id),
+    #             ('invoice_tax_id.type_tax_use', '=', 'sale')
+    #         ], limit=1)
+
+    #         if rep_ln_out.account_id and rep_ln_in.account_id:
+    #             move_vals_lines = [
+    #                 Command.create({
+    #                     'name': _('Tax Received Adjustment'),
+    #                     'debit': 0,
+    #                     'credit': 0.0,
+    #                     'account_id': rep_ln_out.account_id.id
+    #                 }),
+
+    #                 Command.create({
+    #                     'name': _('Tax Paid Adjustment'),
+    #                     'debit': 0.0,
+    #                     'credit': 0,
+    #                     'account_id': rep_ln_in.account_id.id
+    #                 })
+    #             ]
+
+    #     return move_vals_lines, tax_group_subtotal
+
     @api.model
     def _compute_vat_closing_entry(self, company, options):
         """Compute the VAT closing entry.
@@ -252,47 +421,14 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
         This method returns the one2many commands to balance the tax accounts for the selected period, and
         a dictionnary that will help balance the different accounts set per tax group.
         """
-        self = self.with_company(company)  # Needed to handle access to property fields correctly
+        self = self.with_company(company) # Needed to handle access to property fields correctly
         currency_dif = options['currency_dif']
+
         # first, for each tax group, gather the tax entries per tax and account
         self.env['account.tax'].flush_model(['name', 'tax_group_id'])
         self.env['account.tax.repartition.line'].flush_model(['use_in_tax_closing'])
-        self.env['account.move.line'].flush_model(
-            ['account_id', 'debit', 'credit', 'move_id', 'tax_line_id', 'date', 'company_id', 'display_type'])
+        self.env['account.move.line'].flush_model(['account_id', 'debit', 'credit', 'move_id', 'tax_line_id', 'date', 'company_id', 'display_type'])
         self.env['account.move'].flush_model(['state'])
-
-        # Check whether it is multilingual, in order to get the translation from the JSON value if present
-        lang = self.env.user.lang or get_lang(self.env).code
-        tax_name = f"COALESCE(tax.name->>'{lang}', tax.name->>'en_US')" if \
-            self.pool['account.tax'].name.translate else 'tax.name'
-        if currency_dif == self.env.company.currency_id.symbol:
-            sql = f"""
-                    SELECT "account_move_line".tax_line_id as tax_id,
-                            tax.tax_group_id as tax_group_id,
-                            {tax_name} as tax_name,
-                            "account_move_line".account_id,
-                            COALESCE(SUM("account_move_line".balance), 0) as amount
-                    FROM account_tax tax, account_tax_repartition_line repartition, %s
-                    WHERE %s
-                      AND tax.id = "account_move_line".tax_line_id
-                      AND repartition.id = "account_move_line".tax_repartition_line_id
-                      AND repartition.use_in_tax_closing
-                    GROUP BY tax.tax_group_id, "account_move_line".tax_line_id, tax.name, "account_move_line".account_id
-                """
-        else:
-            sql = f"""
-                                SELECT "account_move_line".tax_line_id as tax_id,
-                                        tax.tax_group_id as tax_group_id,
-                                        {tax_name} as tax_name,
-                                        "account_move_line".account_id,
-                                        COALESCE(SUM("account_move_line".balance_usd), 0) as amount
-                                FROM account_tax tax, account_tax_repartition_line repartition, %s
-                                WHERE %s
-                                  AND tax.id = "account_move_line".tax_line_id
-                                  AND repartition.id = "account_move_line".tax_repartition_line_id
-                                  AND repartition.use_in_tax_closing
-                                GROUP BY tax.tax_group_id, "account_move_line".tax_line_id, tax.name, "account_move_line".account_id
-                            """
 
         new_options = {
             **options,
@@ -301,19 +437,68 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
             'multi_company': [{'id': company.id, 'name': company.name}],
         }
 
-        period_start, period_end = company._get_tax_closing_period_boundaries(
-            fields.Date.from_string(options['date']['date_to']))
+        report = self.env['account.report'].browse(options['report_id'])
+        period_start, period_end = company._get_tax_closing_period_boundaries(fields.Date.from_string(options['date']['date_to']), report)
         new_options['date']['date_from'] = fields.Date.to_string(period_start)
         new_options['date']['date_to'] = fields.Date.to_string(period_end)
+        new_options['date']['period_type'] = 'custom'
+        new_options['date']['filter'] = 'custom'
+        new_options = report.with_context(allowed_company_ids=company.ids).get_options(previous_options=new_options)
+        # Force the use of the fiscal position from the original options (_get_options sets the fiscal
+        # position to 'all' when the report is the generic tax report)
+        new_options['fiscal_position'] = options['fiscal_position']
 
-        tables, where_clause, where_params = self.env.ref('account.generic_tax_report')._query_get(
+        query = self.env.ref('account.generic_tax_report')._get_report_query(
             new_options,
             'strict_range',
             domain=self._get_vat_closing_entry_additional_domain()
         )
-        query = sql % (tables, where_clause)
-        self.env.cr.execute(query, where_params)
+
+        # Check whether it is multilingual, in order to get the translation from the JSON value if present
+        tax_name = self.env['account.tax']._field_to_sql('tax', 'name')
+        if currency_dif == self.env.company.currency_id.symbol:
+
+            query = SQL(
+                """
+                SELECT "account_move_line".tax_line_id as tax_id,
+                        tax.tax_group_id as tax_group_id,
+                        %(tax_name)s as tax_name,
+                        "account_move_line".account_id,
+                        COALESCE(SUM("account_move_line".balance), 0) as amount
+                FROM account_tax tax, account_tax_repartition_line repartition, %(table_references)s
+                WHERE %(search_condition)s
+                  AND tax.id = "account_move_line".tax_line_id
+                  AND repartition.id = "account_move_line".tax_repartition_line_id
+                  AND repartition.use_in_tax_closing
+                GROUP BY tax.tax_group_id, "account_move_line".tax_line_id, tax.name, "account_move_line".account_id
+                """,
+                tax_name=tax_name,
+                table_references=query.from_clause,
+                search_condition=query.where_clause,
+            )
+        else:
+            query = SQL(
+                """
+                SELECT "account_move_line".tax_line_id as tax_id,
+                        tax.tax_group_id as tax_group_id,
+                        %(tax_name)s as tax_name,
+                        "account_move_line".account_id,
+                        COALESCE(SUM("account_move_line".balance_usd), 0) as amount
+                FROM account_tax tax, account_tax_repartition_line repartition, %(table_references)s
+                WHERE %(search_condition)s
+                  AND tax.id = "account_move_line".tax_line_id
+                  AND repartition.id = "account_move_line".tax_repartition_line_id
+                  AND repartition.use_in_tax_closing
+                GROUP BY tax.tax_group_id, "account_move_line".tax_line_id, tax.name, "account_move_line".account_id
+                """,
+                tax_name=tax_name,
+                table_references=query.from_clause,
+                search_condition=query.where_clause,
+            )
+
+        self.env.cr.execute(query)
         results = self.env.cr.dictfetchall()
+        # results = self._postprocess_vat_closing_entry_results(company, new_options, results)
 
         tax_group_ids = [r['tax_group_id'] for r in results]
         tax_groups = {}
@@ -322,8 +507,7 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
                 tax_groups[tg] = {}
             if result.get('tax_id') not in tax_groups[tg]:
                 tax_groups[tg][result.get('tax_id')] = []
-            tax_groups[tg][result.get('tax_id')].append(
-                (result.get('tax_name'), result.get('account_id'), result.get('amount')))
+            tax_groups[tg][result.get('tax_id')].append((result.get('tax_name'), result.get('account_id'), result.get('amount')))
 
         # then loop on previous results to
         #    * add the lines that will balance their sum per account
@@ -335,14 +519,15 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
         for tg, values in tax_groups.items():
             total = 0
             # ignore line that have no property defined on tax group
+            # if not tg.tax_receivable_account_id or not tg.tax_payable_account_id:
+            #     continue
             if not tg.property_tax_receivable_account_id or not tg.property_tax_payable_account_id:
                 continue
             for dummy, value in values.items():
                 for v in value:
                     tax_name, account_id, amt = v
                     # Line to balance
-                    move_vals_lines.append((0, 0, {'name': tax_name, 'debit': abs(amt) if amt < 0 else 0,
-                                                   'credit': amt if amt > 0 else 0, 'account_id': account_id}))
+                    move_vals_lines.append((0, 0, {'name': tax_name, 'debit': abs(amt) if amt < 0 else 0, 'credit': amt if amt > 0 else 0, 'account_id': account_id}))
                     total += amt
 
             if not currency.is_zero(total):
@@ -364,6 +549,7 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
                 ('company_id', '=', company.id),
                 ('invoice_tax_id.type_tax_use', '=', 'purchase')
             ], limit=1)
+            # change
             rep_ln_out = self.env['account.tax.repartition.line'].search([
                 ('account_id.deprecated', '=', False),
                 ('repartition_type', '=', 'tax'),
@@ -391,14 +577,15 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
         return move_vals_lines, tax_group_subtotal
 
     @api.model
-    def _add_tax_group_closing_items(self, tax_group_subtotal, end_date, options):
+    def _add_tax_group_closing_items(self, tax_group_subtotal, closing_move):
         """Transform the parameter tax_group_subtotal dictionnary into one2many commands.
 
         Used to balance the tax group accounts for the creation of the vat closing entry.
         """
-        currency_dif = options['currency_dif']
+
         def _add_line(account, name, company_currency):
             self.env.cr.execute(sql_account, (account, end_date))
+
             result = self.env.cr.dictfetchone()
             advance_balance = result.get('balance') or 0
             # Deduct/Add advance payment
@@ -414,22 +601,25 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
         currency = self.env.company.currency_id
         if currency_dif == self.env.company.currency_id.symbol:
             sql_account = '''
-                    SELECT SUM(aml.balance) AS balance
-                    FROM account_move_line aml
-                    LEFT JOIN account_move move ON move.id = aml.move_id
-                    WHERE aml.account_id = %s
-                      AND aml.date <= %s
-                      AND move.state = 'posted'
-                '''
+                SELECT SUM(aml.balance) AS balance
+                FROM account_move_line aml
+                LEFT JOIN account_move move ON move.id = aml.move_id
+                WHERE aml.account_id = %s
+                  AND aml.date <= %s
+                  AND move.state = 'posted'
+                  AND aml.company_id = %s
+            '''
         else:
             sql_account = '''
-                            SELECT SUM(aml.balance_usd) AS balance
-                            FROM account_move_line aml
-                            LEFT JOIN account_move move ON move.id = aml.move_id
-                            WHERE aml.account_id = %s
-                              AND aml.date <= %s
-                              AND move.state = 'posted'
-                        '''
+                SELECT SUM(aml.balance_usd) AS balance
+                FROM account_move_line aml
+                LEFT JOIN account_move move ON move.id = aml.move_id
+                WHERE aml.account_id = %s
+                  AND aml.date <= %s
+                  AND move.state = 'posted'
+                  AND aml.company_id = %s
+            '''
+
         line_ids_vals = []
         # keep track of already balanced account, as one can be used in several tax group
         account_already_balanced = []
@@ -476,6 +666,8 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
                           the report.
         :return: The closing moves.
         """
+
+        # change
         if companies is None:
             options_company_ids = [company_opt['id'] for company_opt in options.get('multi_company', [])]
             companies = self.env['res.company'].browse(options_company_ids) if options_company_ids else self.env.company
@@ -489,7 +681,7 @@ class GenericTaxReportCustomHandler(models.AbstractModel):
             closing_moves = self.env['account.move']
             for company in companies:
                 include_domestic, fiscal_positions = self._get_fpos_info_for_tax_closing(company, report, options)
-                company_closing_moves = company._get_and_update_tax_closing_moves(end_date, fiscal_positions=fiscal_positions, include_domestic=include_domestic)
+                company_closing_moves = company._get_and_update_tax_closing_moves(end_date, report, fiscal_positions=fiscal_positions, include_domestic=include_domestic)
                 closing_moves_by_company[company] = company_closing_moves
                 closing_moves += company_closing_moves
 
