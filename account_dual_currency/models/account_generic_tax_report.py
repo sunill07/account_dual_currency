@@ -7,6 +7,7 @@ from odoo.addons.web.controllers.utils import clean_action
 from odoo.exceptions import UserError, RedirectWarning
 from odoo.osv import expression
 from odoo.tools.misc import get_lang
+from odoo.tools import SQL
 
 
 class GenericTaxReportCustomHandler(models.AbstractModel):
